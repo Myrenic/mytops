@@ -244,7 +244,10 @@ export function App() {
         "/apis/apps/v1/namespaces/services/deployments",
         deploymentManifest(e, name, slug)
       )
-      await apiPost("/api/v1/namespaces/services", serviceManifest(name))
+      await apiPost(
+        "/api/v1/namespaces/services/services",
+        serviceManifest(name)
+      )
       await apiPost(
         "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
         ingressManifest(name, domain)
@@ -324,7 +327,7 @@ export function App() {
       for (const d of list.items ?? []) {
         const n: string = d.metadata.name
         await apiDel(`/apis/apps/v1/namespaces/services/deployments/${n}`)
-        await apiDel(`/api/v1/namespaces/services/${n}`)
+        await apiDel(`/api/v1/namespaces/services/services/${n}`)
         await apiDel(
           `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${n}`
         )
