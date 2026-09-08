@@ -8,9 +8,14 @@
       "icon": "🐧",
       "image": "ghcr.io/linuxserver/webtop:ubuntu-kde",
       "env": [
-        { "name": "PIXELFLUX_WAYLAND", "value": "true" }
+        {
+          "name": "PIXELFLUX_WAYLAND",
+          "value": "true"
+        }
       ],
-      "users": ["test@chacdn.local"]
+      "groups": [
+        "ubuntu-desktop"
+      ]
     },
     {
       "id": "firefox",
@@ -20,10 +25,18 @@
       "icon": "🦊",
       "image": "ghcr.io/linuxserver/firefox:latest",
       "env": [
-        { "name": "PIXELFLUX_WAYLAND", "value": "true" },
-        { "name": "RESTART_APP", "value": "true" }
+        {
+          "name": "PIXELFLUX_WAYLAND",
+          "value": "true"
+        },
+        {
+          "name": "RESTART_APP",
+          "value": "true"
+        }
       ],
-      "users": ["test@chacdn.local"]
+      "groups": [
+        "firefox"
+      ]
     }
   ]
 }

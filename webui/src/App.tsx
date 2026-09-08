@@ -22,8 +22,8 @@ interface CatalogEntry {
   /** selkies image to launch a per-user instance from */
   image: string
   env?: { name: string; value: string }[]
-  /** emails allowed to see/launch this entry; empty = everyone logged in */
-  users?: string[]
+  /** Keycloak groups allowed to see/launch this entry; empty = everyone */
+  groups?: string[]
 }
 
 interface Me {
@@ -197,9 +197,13 @@ export function App() {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
+    const myGroups = new Set(
+      (me?.groups ?? "").split(",").map((g) => g.trim()).filter(Boolean)
+    )
     return entries.filter((e) => {
-      if (e.users && e.users.length && !e.users.includes(me?.email ?? "")) {
-        return false
+      if (e.groups && e.groups.length) {
+        const allowed = e.groups.some((g) => myGroups.has(g))
+        if (!allowed) return false
       }
       return (
         (filter === "all" || e.type === filter) &&
