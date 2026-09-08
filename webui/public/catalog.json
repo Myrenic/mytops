@@ -3,7 +3,7 @@
     {
       "id": "ubuntu-desktop",
       "name": "Ubuntu Desktop",
-      "description": "Full Ubuntu (labwc) desktop on the Selkies base image.",
+      "description": "Full KDE Plasma desktop (Wayland) on webtop.",
       "type": "desktop",
       "icon": "🐧",
       "deployment": "desktop-ubuntu",
@@ -12,7 +12,7 @@
     {
       "id": "fedora-desktop",
       "name": "Fedora Desktop",
-      "description": "Full Fedora (labwc) desktop on the Selkies base image.",
+      "description": "Full XFCE desktop (Wayland) on webtop.",
       "type": "desktop",
       "icon": "🌐",
       "deployment": "desktop-fedora",

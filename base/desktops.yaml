@@ -1,7 +1,6 @@
-# Example Selkies desktops built directly on the linuxserver baseimage.
-# Interim stand-ins until we build our own app/desktop images. Each is a full
-# desktop (labwc, no selkies panel); Traefik proxies HTTP port 3000 and auto-upgrades
-# the /websocket stream.
+# Full desktop environments from linuxserver webtop (built on the selkies
+# baseimage): KDE Plasma (Wayland) and XFCE. Traefik proxies HTTP port 3000
+# and auto-upgrades the /websocket stream.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,7 +18,7 @@ spec:
     spec:
       containers:
         - name: desktop
-          image: ghcr.io/linuxserver/baseimage-selkies:ubunturesolute
+          image: ghcr.io/linuxserver/webtop:ubuntu-kde
           ports:
             - name: http
               containerPort: 3000
@@ -32,17 +31,15 @@ spec:
               value: "${TZ}"
             - name: PIXELFLUX_WAYLAND
               value: "true"
-            - name: SELKIES_DESKTOP
-              value: "false"
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
           resources:
             requests:
               cpu: 250m
-              memory: 256Mi
+              memory: 512Mi
             limits:
-              memory: 2Gi
+              memory: 4Gi
       volumes:
         - name: dshm
           emptyDir:
@@ -79,7 +76,7 @@ spec:
     spec:
       containers:
         - name: desktop
-          image: ghcr.io/linuxserver/baseimage-selkies:fedora44
+          image: ghcr.io/linuxserver/webtop:fedora-xfce
           ports:
             - name: http
               containerPort: 3000
@@ -92,8 +89,6 @@ spec:
               value: "${TZ}"
             - name: PIXELFLUX_WAYLAND
               value: "true"
-            - name: SELKIES_DESKTOP
-              value: "false"
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
