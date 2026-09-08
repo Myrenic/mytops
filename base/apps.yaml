@@ -12,6 +12,8 @@ spec:
   # restart never needs two pods' requests scheduled at once.
   strategy:
     type: Recreate
+    # null clears the server-defaulted rollingUpdate block under SSA
+    rollingUpdate: null
   selector:
     matchLabels:
       app: firefox
