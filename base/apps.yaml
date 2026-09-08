@@ -1,0 +1,60 @@
+# Single-app Selkies containers (linuxserver app images built on the selkies
+# baseimage). Each launches just the named app under labwc/Wayland, so it
+# behaves like an abcdesktop-style "app" rather than a full desktop.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: firefox
+  namespace: services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: firefox
+  template:
+    metadata:
+      labels:
+        app: firefox
+    spec:
+      containers:
+        - name: app
+          image: ghcr.io/linuxserver/firefox:latest
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "${TZ}"
+            - name: PIXELFLUX_WAYLAND
+              value: "true"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: firefox
+  namespace: services
+spec:
+  selector:
+    app: firefox
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

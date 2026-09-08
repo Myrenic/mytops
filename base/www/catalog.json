@@ -15,6 +15,14 @@
       "type": "desktop",
       "icon": "🌐",
       "url": "https://desktop-fedora.${SECRET_DOMAIN_0}"
+    },
+    {
+      "id": "firefox",
+      "name": "Firefox",
+      "description": "Mozilla Firefox in a single-app Selkies container.",
+      "type": "app",
+      "icon": "🦊",
+      "url": "https://firefox.${SECRET_DOMAIN_0}"
     }
   ]
 }
