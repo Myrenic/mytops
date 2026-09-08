@@ -1,0 +1,27 @@
+# Custom nginx config for the webui: SPA fallback + /me identity endpoint
+# that echoes the oauth2-proxy identity headers via SSI.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chacdn-nginx
+  namespace: services
+data:
+  default.conf: |
+    server {
+        listen 80 default_server;
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        # Identity for the SPA: oauth2-proxy (set-xauthrequest) injects
+        # X-Auth-Request-Email/Groups, SSI echoes them as JSON.
+        location = /me {
+            ssi on;
+            ssi_types *;
+            default_type application/json;
+        }
+    }

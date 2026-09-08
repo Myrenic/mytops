@@ -1,0 +1,1 @@
+{"email":"<!--#echo var="http_x_auth_request_email" -->","groups":"<!--#echo var="http_x_auth_request_groups" -->"}

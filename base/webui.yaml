@@ -23,6 +23,8 @@ spec:
           volumeMounts:
             - name: webui
               mountPath: /usr/share/nginx/html
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
             - name: cache
               mountPath: /var/cache/nginx
             - name: run
@@ -59,6 +61,9 @@ spec:
         - name: webui
           configMap:
             name: chacdn-webui
+        - name: nginx-conf
+          configMap:
+            name: chacdn-nginx
         - name: cache
           emptyDir: {}
         - name: run

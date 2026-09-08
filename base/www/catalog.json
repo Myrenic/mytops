@@ -3,20 +3,27 @@
     {
       "id": "ubuntu-desktop",
       "name": "Ubuntu Desktop",
-      "description": "Full KDE Plasma desktop (Wayland) on webtop.",
+      "description": "Full KDE Plasma desktop (Wayland).",
       "type": "desktop",
       "icon": "🐧",
-      "deployment": "desktop-ubuntu",
-      "url": "https://desktop-ubuntu.${SECRET_DOMAIN_0}"
+      "image": "ghcr.io/linuxserver/webtop:ubuntu-kde",
+      "env": [
+        { "name": "PIXELFLUX_WAYLAND", "value": "true" }
+      ],
+      "users": ["test@chacdn.local"]
     },
     {
       "id": "firefox",
       "name": "Firefox",
-      "description": "Mozilla Firefox in a single-app Selkies container.",
+      "description": "Mozilla Firefox in a single-app container.",
       "type": "app",
       "icon": "🦊",
-      "deployment": "firefox",
-      "url": "https://firefox.${SECRET_DOMAIN_0}"
+      "image": "ghcr.io/linuxserver/firefox:latest",
+      "env": [
+        { "name": "PIXELFLUX_WAYLAND", "value": "true" },
+        { "name": "RESTART_APP", "value": "true" }
+      ],
+      "users": ["test@chacdn.local"]
     }
   ]
 }

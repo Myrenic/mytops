@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { Monitor, Play, RotateCw, Search, X } from "lucide-react"
+import { LogOut, Monitor, Play, RotateCw, Search, X } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -19,9 +19,16 @@ interface CatalogEntry {
   description?: string
   type: EntryType
   icon?: string
-  url: string
-  /** Name of the k8s Deployment backing this workspace (for restart). */
-  deployment?: string
+  /** selkies image to launch a per-user instance from */
+  image: string
+  env?: { name: string; value: string }[]
+  /** emails allowed to see/launch this entry; empty = everyone logged in */
+  users?: string[]
+}
+
+interface Me {
+  email: string
+  groups: string
 }
 
 const FILTERS: { id: EntryType | "all"; label: string }[] = [
@@ -35,54 +42,233 @@ const FALLBACK_ICON: Record<EntryType, string> = {
   app: "🧩",
 }
 
+// Stable per-user suffix so the same user reuses their instances.
+function slugFor(email: string): string {
+  let h = 0
+  for (const c of email.toLowerCase()) h = (h * 31 + c.charCodeAt(0)) >>> 0
+  return "u" + (h >>> 0).toString(16).padStart(8, "0")
+}
+
+function baseDomain(): string {
+  const parts = window.location.hostname.split(".")
+  return parts.length > 1 ? parts.slice(1).join(".") : window.location.hostname
+}
+
+async function readJson(path: string, init?: RequestInit): Promise<any> {
+  const res = await fetch(path, init)
+  const ct = res.headers.get("content-type") ?? ""
+  if (!ct.includes("application/json")) {
+    throw new Error("not-json")
+  }
+  return res.json()
+}
+
+function deploymentManifest(entry: CatalogEntry, name: string, owner: string): any {
+  return {
+    apiVersion: "apps/v1",
+    kind: "Deployment",
+    metadata: {
+      name,
+      namespace: "services",
+      labels: { app: name, "chacdn-owner": owner },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { app: name } },
+      template: {
+        metadata: { labels: { app: name } },
+        spec: {
+          containers: [
+            {
+              name: "workspace",
+              image: entry.image,
+              ports: [{ name: "http", containerPort: 3000 }],
+              env: [
+                { name: "PUID", value: "1000" },
+                { name: "PGID", value: "1000" },
+                ...(entry.env ?? []),
+              ],
+              volumeMounts: [{ name: "dshm", mountPath: "/dev/shm" }],
+              resources: {
+                requests: { cpu: "250m", memory: "256Mi" },
+                limits: { memory: entry.type === "desktop" ? "4Gi" : "2Gi" },
+              },
+            },
+          ],
+          volumes: [
+            { name: "dshm", emptyDir: { medium: "Memory", sizeLimit: "1Gi" } },
+          ],
+        },
+      },
+    },
+  }
+}
+
+function serviceManifest(name: string): any {
+  return {
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: { name, namespace: "services" },
+    spec: {
+      selector: { app: name },
+      ports: [{ name: "http", port: 3000, targetPort: "http" }],
+    },
+  }
+}
+
+function ingressManifest(name: string, domain: string): any {
+  return {
+    apiVersion: "traefik.io/v1alpha1",
+    kind: "IngressRoute",
+    metadata: { name, namespace: "network" },
+    spec: {
+      entryPoints: ["websecure"],
+      routes: [
+        {
+          match: `Host(\`${name}.${domain}\`)`,
+          kind: "Rule",
+          services: [{ name, namespace: "services", port: 3000 }],
+        },
+      ],
+      tls: { secretName: "domain-0-prod-tls" },
+    },
+  }
+}
+
 export function App() {
+  const [me, setMe] = useState<Me | null>(null)
   const [entries, setEntries] = useState<CatalogEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState("")
   const [filter, setFilter] = useState<EntryType | "all">("all")
 
-  // Open workspaces + which one is shown in the embedded frame. Clicking a
-  // catalog card opens/reopens one; the header tabs switch between them.
+  // Open workspaces (per-user instances) + which one is shown in the frame.
   const [workspaces, setWorkspaces] = useState<CatalogEntry[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
-
-  // Fresh-session restart via the kubectl-proxy sidecar.
+  const [startingId, setStartingId] = useState<string | null>(null)
   const [restartingId, setRestartingId] = useState<string | null>(null)
   const [restartError, setRestartError] = useState<string | null>(null)
   const [frameNonce, setFrameNonce] = useState(0)
 
+  const slug = useMemo(() => (me ? slugFor(me.email) : ""), [me])
+  const domain = useMemo(() => baseDomain(), [])
+  const instName = (e: CatalogEntry) => `ws-${e.id}-${slug}`
+  const instUrl = (e: CatalogEntry) => `https://${instName(e)}.${domain}`
+  const depPath = (e: CatalogEntry) =>
+    `/apis/apps/v1/namespaces/services/deployments/${instName(e)}`
+
+  // Identity + catalog. oauth2-proxy gates the whole host, so /me is JSON
+  // unless the session expired (then it's the login page -> not-json).
   useEffect(() => {
-    fetch("catalog.json", { cache: "no-store" })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.json()
-      })
-      .then((data) => {
-        setEntries(Array.isArray(data.apps) ? data.apps : [])
+    ;(async () => {
+      try {
+        const [m, cat] = await Promise.all([
+          readJson("/me"),
+          readJson("catalog.json", { cache: "no-store" }),
+        ])
+        setMe(m)
+        setEntries(Array.isArray(cat.apps) ? cat.apps : [])
         setError(null)
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false))
+      } catch (err) {
+        setError(err instanceof Error && err.message === "not-json"
+          ? "You are not signed in."
+          : err instanceof Error ? err.message : String(err))
+      } finally {
+        setLoading(false)
+      }
+    })()
   }, [])
+
+  // If the session dies mid-use, tear the user's instances down and let
+  // oauth2-proxy bounce us back to the login page.
+  useEffect(() => {
+    if (!me) return
+    const t = setInterval(async () => {
+      try {
+        await readJson("/me")
+      } catch {
+        await teardownAll()
+        window.location.reload()
+      }
+    }, 60000)
+    return () => clearInterval(t)
+  }, [me])
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return entries.filter(
-      (e) =>
+    return entries.filter((e) => {
+      if (e.users && e.users.length && !e.users.includes(me?.email ?? "")) {
+        return false
+      }
+      return (
         (filter === "all" || e.type === filter) &&
         (!q ||
           (e.name + " " + (e.description ?? "")).toLowerCase().includes(q))
-    )
-  }, [entries, query, filter])
+      )
+    })
+  }, [entries, query, filter, me])
 
   const active = workspaces.find((w) => w.id === activeId) ?? null
 
-  const openWorkspace = (entry: CatalogEntry) => {
-    setWorkspaces((prev) =>
-      prev.some((w) => w.id === entry.id) ? prev : [...prev, entry]
-    )
-    setActiveId(entry.id)
+  const apiPost = async (path: string, body: unknown) => {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok && res.status !== 409) throw new Error(`HTTP ${res.status}`)
+  }
+
+  const apiDel = async (path: string) => {
+    const res = await fetch(path, { method: "DELETE" })
+    if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`)
+  }
+
+  const ensureInstance = async (e: CatalogEntry) => {
+    const exists = await (async () => {
+      try {
+        const dep = await readJson(depPath(e))
+        return dep.kind !== "Status" // 404s come back as Status objects
+      } catch {
+        return false
+      }
+    })()
+    if (!exists) {
+      const name = instName(e)
+      await apiPost(
+        "/apis/apps/v1/namespaces/services/deployments",
+        deploymentManifest(e, name, slug)
+      )
+      await apiPost("/api/v1/namespaces/services", serviceManifest(name))
+      await apiPost(
+        "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
+        ingressManifest(name, domain)
+      )
+    }
+    const deadline = Date.now() + 180_000
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000))
+      const dep = await readJson(depPath(e))
+      if ((dep.status?.readyReplicas ?? 0) >= 1) return
+    }
+    throw new Error("instance did not become ready")
+  }
+
+  const connect = async (e: CatalogEntry) => {
+    setStartingId(e.id)
+    setError(null)
+    try {
+      await ensureInstance(e)
+      setWorkspaces((prev) =>
+        prev.some((w) => w.id === e.id) ? prev : [...prev, e]
+      )
+      setActiveId(e.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setStartingId(null)
+    }
   }
 
   const closeWorkspace = (id: string) => {
@@ -93,41 +279,29 @@ export function App() {
     }
   }
 
-  // Roll the workspace's Deployment (annotation patch -> new ReplicaSet ->
-  // fresh pod), then wait for the new pod to be ready and reload the frame.
-  const restartWorkspace = async (ws: CatalogEntry) => {
-    if (!ws.deployment || restartingId) return
-    setRestartingId(ws.id)
+  const restart = async (e: CatalogEntry) => {
+    setRestartingId(e.id)
     setRestartError(null)
     try {
-      const patchRes = await fetch(
-        `/apis/apps/v1/namespaces/services/deployments/${ws.deployment}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/merge-patch+json" },
-          body: JSON.stringify({
-            spec: {
-              template: {
-                metadata: {
-                  annotations: { "chacdn/restartedAt": new Date().toISOString() },
-                },
+      const res = await fetch(depPath(e), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/merge-patch+json" },
+        body: JSON.stringify({
+          spec: {
+            template: {
+              metadata: {
+                annotations: { "chacdn/restartedAt": new Date().toISOString() },
               },
             },
-          }),
-        }
-      )
-      if (!patchRes.ok) {
-        throw new Error(`restart rejected (HTTP ${patchRes.status})`)
-      }
-      const deadline = Date.now() + 120_000
+          },
+        }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const deadline = Date.now() + 180_000
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 3000))
-        const dep = await (
-          await fetch(`/apis/apps/v1/namespaces/services/deployments/${ws.deployment}`)
-        ).json()
-        if ((dep.status?.readyReplicas ?? 0) >= (dep.spec?.replicas ?? 1)) {
-          break
-        }
+        const dep = await readJson(depPath(e))
+        if ((dep.status?.readyReplicas ?? 0) >= 1) break
       }
       setFrameNonce((n) => n + 1)
     } catch (err) {
@@ -137,9 +311,55 @@ export function App() {
     }
   }
 
+  const teardownAll = async () => {
+    if (!slug) return
+    try {
+      const list = await readJson(
+        `/apis/apps/v1/namespaces/services/deployments?labelSelector=chacdn-owner%3D${slug}`
+      )
+      for (const d of list.items ?? []) {
+        const n: string = d.metadata.name
+        await apiDel(`/apis/apps/v1/namespaces/services/deployments/${n}`)
+        await apiDel(`/api/v1/namespaces/services/${n}`)
+        await apiDel(
+          `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${n}`
+        )
+      }
+    } catch {
+      // best effort
+    }
+    setWorkspaces([])
+    setActiveId(null)
+  }
+
+  const logout = async () => {
+    await teardownAll()
+    const rd = encodeURIComponent(window.location.origin)
+    window.location.href = `https://auth.${domain}/oauth2/sign_out?rd=${rd}`
+  }
+
+  if (loading) {
+    return (
+      <div className="grid min-h-svh place-items-center bg-background text-sm text-muted-foreground">
+        Signing in…
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="grid min-h-svh place-items-center bg-background">
+        <div className="flex flex-col items-center gap-4 text-center">
+          <p className="max-w-md text-sm text-muted-foreground">{error}</p>
+          <Button onClick={() => window.location.reload()}>Reload</Button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-svh flex-col bg-background text-foreground">
-      {/* Top bar: brand + one tab per open workspace */}
+      {/* Top bar: brand + one tab per open workspace + user */}
       <header className="flex h-12 shrink-0 items-center gap-2 border-b bg-card px-3">
         <button
           type="button"
@@ -200,44 +420,60 @@ export function App() {
           })}
         </nav>
 
-        {active && (
-          <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
-            {restartError && (
-              <span className="max-w-64 truncate text-xs text-destructive" title={restartError}>
-                Restart failed
-              </span>
-            )}
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => restartWorkspace(active)}
-              disabled={restartingId !== null}
-              title="Recreate this workspace with a fresh pod"
-            >
-              <RotateCw
-                className={`size-4 ${restartingId === active.id ? "animate-spin" : ""}`}
-              />
-              <span className="hidden sm:inline">
-                {restartingId === active.id ? "Restarting…" : "Restart"}
-              </span>
-            </Button>
-          </div>
-        )}
+        <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
+          {active && (
+            <>
+              {restartError && (
+                <span
+                  className="max-w-56 truncate text-xs text-destructive"
+                  title={restartError}
+                >
+                  Restart failed
+                </span>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => restart(active)}
+                disabled={restartingId !== null}
+                title="Recreate this workspace with a fresh pod"
+              >
+                <RotateCw
+                  className={`size-4 ${
+                    restartingId === active.id ? "animate-spin" : ""
+                  }`}
+                />
+                <span className="hidden sm:inline">
+                  {restartingId === active.id ? "Restarting…" : "Restart"}
+                </span>
+              </Button>
+            </>
+          )}
+          <span className="hidden max-w-48 truncate text-xs text-muted-foreground md:inline">
+            {me?.email}
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={logout}
+            title="Sign out and shut down your workspaces"
+          >
+            <LogOut className="size-4" />
+            <span className="hidden sm:inline">Sign out</span>
+          </Button>
+        </div>
       </header>
 
       {active ? (
         // Embedded Selkies workspace; only the active one is mounted so the
-        // video stream stops when you switch (the desktop pod keeps running).
+        // video stream stops when you switch (the pod keeps running).
         <div className="relative min-h-0 flex-1 bg-black">
           <iframe
             key={`${active.id}-${frameNonce}`}
-            src={active.url}
+            src={instUrl(active)}
             title={active.name}
             className="block h-full w-full border-0"
-            // No clipboard-read: selkies' clipboard-in sync would trigger the
-            // browser paste-permission prompt on first click. clipboard-write
-            // (copy out of the remote) still works.
-            allow="autoplay; clipboard-write; display-capture; fullscreen; microphone; pointer-lock"
+            allow="autoplay; clipboard-read; clipboard-write; display-capture; fullscreen; microphone; pointer-lock"
           />
           {(restartingId === active.id || restartError) && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-background/95 text-sm text-muted-foreground">
@@ -274,17 +510,13 @@ export function App() {
               </div>
             </div>
 
-            {loading ? (
+            {error ? (
               <p className="py-12 text-center text-sm text-muted-foreground">
-                Loading catalog…
-              </p>
-            ) : error ? (
-              <p className="py-12 text-center text-sm text-muted-foreground">
-                Could not load catalog: {error}
+                {error}
               </p>
             ) : visible.length === 0 ? (
               <p className="py-12 text-center text-sm text-muted-foreground">
-                Nothing here. Add apps/desktops to the catalog to see them.
+                Nothing assigned to you yet.
               </p>
             ) : (
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -307,11 +539,14 @@ export function App() {
                     <CardFooter>
                       <Button
                         className="w-full"
-                        onClick={() => openWorkspace(e)}
+                        onClick={() => connect(e)}
+                        disabled={startingId === e.id}
                       >
-                        {workspaces.some((w) => w.id === e.id)
-                          ? "Switch to"
-                          : "Connect"}
+                        {startingId === e.id
+                          ? "Starting…"
+                          : workspaces.some((w) => w.id === e.id)
+                            ? "Switch to"
+                            : "Connect"}
                         <Play className="ml-2 size-4" />
                       </Button>
                     </CardFooter>

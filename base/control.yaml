@@ -1,6 +1,7 @@
-# Scoped ServiceAccount for the webui's kubectl-proxy sidecar. Only allows
-# reading and rolling workspace Deployments in this namespace, so the "Restart"
-# button in the UI can recreate a fresh pod.
+# Scoped ServiceAccount for the webui's kubectl-proxy sidecar. Allows the SPA
+# to create/read/roll/delete per-user workspace pods (Deployments + Services
+# in services, IngressRoutes in network) and to patch Deployments for the
+# "Restart" button.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -15,13 +16,41 @@ metadata:
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: chacdn-control
   namespace: services
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chacdn-control
+subjects:
+  - kind: ServiceAccount
+    name: chacdn-control
+    namespace: services
+---
+# IngressRoutes live in the network namespace, so a second Role/Binding there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chacdn-control
+  namespace: network
+rules:
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutes"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chacdn-control
+  namespace: network
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
