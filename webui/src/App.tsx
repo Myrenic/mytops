@@ -234,7 +234,10 @@ export function App() {
             src={active.url}
             title={active.name}
             className="block h-full w-full border-0"
-            allow="autoplay; clipboard-read; clipboard-write; display-capture; fullscreen; microphone; pointer-lock"
+            // No clipboard-read: selkies' clipboard-in sync would trigger the
+            // browser paste-permission prompt on first click. clipboard-write
+            // (copy out of the remote) still works.
+            allow="autoplay; clipboard-write; display-capture; fullscreen; microphone; pointer-lock"
           />
           {(restartingId === active.id || restartError) && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-background/95 text-sm text-muted-foreground">

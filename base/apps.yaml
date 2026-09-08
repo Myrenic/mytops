@@ -31,6 +31,9 @@ spec:
               value: "${TZ}"
             - name: PIXELFLUX_WAYLAND
               value: "true"
+            # clipboard-in reads the client clipboard -> browser paste prompt
+            - name: SELKIES_CLIPBOARD_IN_ENABLED
+              value: "false"
             - name: RESTART_APP
               value: "true"
           volumeMounts:
