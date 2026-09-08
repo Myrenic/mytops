@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chacdn-webui
+  namespace: services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chacdn-webui
+  template:
+    metadata:
+      labels:
+        app: chacdn-webui
+    spec:
+      containers:
+        - name: webui
+          image: nginx:1.27-alpine
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: webui
+              mountPath: /usr/share/nginx/html
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: webui
+          configMap:
+            name: chacdn-webui
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chacdn-webui
+  namespace: services
+spec:
+  selector:
+    app: chacdn-webui
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

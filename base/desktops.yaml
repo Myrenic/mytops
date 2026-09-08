@@ -1,0 +1,123 @@
+# Example Selkies desktops built directly on the linuxserver baseimage.
+# Interim stand-ins until we build our own app/desktop images. Each is a full
+# desktop (labwc + panel); Traefik proxies HTTP port 3000 and auto-upgrades
+# the /websocket stream.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: desktop-ubuntu
+  namespace: services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: desktop-ubuntu
+  template:
+    metadata:
+      labels:
+        app: desktop-ubuntu
+    spec:
+      containers:
+        - name: desktop
+          image: ghcr.io/linuxserver/baseimage-selkies:ubunturesolute
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "${TZ}"
+            - name: PIXELFLUX_WAYLAND
+              value: "true"
+            - name: SELKIES_DESKTOP
+              value: "true"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: desktop-ubuntu
+  namespace: services
+spec:
+  selector:
+    app: desktop-ubuntu
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: desktop-fedora
+  namespace: services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: desktop-fedora
+  template:
+    metadata:
+      labels:
+        app: desktop-fedora
+    spec:
+      containers:
+        - name: desktop
+          image: ghcr.io/linuxserver/baseimage-selkies:fedora44
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "${TZ}"
+            - name: PIXELFLUX_WAYLAND
+              value: "true"
+            - name: SELKIES_DESKTOP
+              value: "true"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: desktop-fedora
+  namespace: services
+spec:
+  selector:
+    app: desktop-fedora
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
