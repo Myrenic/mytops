@@ -10,15 +10,6 @@
       "url": "https://desktop-ubuntu.${SECRET_DOMAIN_0}"
     },
     {
-      "id": "fedora-desktop",
-      "name": "Fedora Desktop",
-      "description": "Full XFCE desktop (Wayland) on webtop.",
-      "type": "desktop",
-      "icon": "🌐",
-      "deployment": "desktop-fedora",
-      "url": "https://desktop-fedora.${SECRET_DOMAIN_0}"
-    },
-    {
       "id": "firefox",
       "name": "Firefox",
       "description": "Mozilla Firefox in a single-app Selkies container.",
