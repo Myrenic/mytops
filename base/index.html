@@ -172,14 +172,12 @@
     for (const it of list) {
       const card = document.createElement("div");
       card.className = "card";
-      card.innerHTML = `
-        <div class="icon">${it.icon || "🖥️"}</div>
-        <h3>${it.name}</h3>
-        <p>${it.description || ""}</p>
-        <div class="meta">
-          <span class="badge ${it.type}">${it.type}</span>
-        </div>
-        <a class="connect" href="${it.url}" target="_blank" rel="noopener">Connect</a>`;
+      card.innerHTML =
+        '<div class="icon">' + (it.icon || "🖥️") + "</div>" +
+        "<h3>" + it.name + "</h3>" +
+        "<p>" + (it.description || "") + "</p>" +
+        '<div class="meta"><span class="badge ' + it.type + '">' + it.type + "</span></div>" +
+        '<a class="connect" href="' + it.url + '" target="_blank" rel="noopener">Connect</a>';
       grid.appendChild(card);
     }
   }
@@ -191,7 +189,7 @@
 
   load().catch(err => {
     document.getElementById("grid").innerHTML =
-      `<div class="empty">Could not load catalog.json: ${err.message}</div>`;
+      '<div class="empty">Could not load catalog.json: ' + err.message + "</div>";
   });
 </script>
 </body>
