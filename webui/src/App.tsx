@@ -153,6 +153,18 @@ export function App() {
 
   const slug = useMemo(() => (me ? slugFor(me.email) : ""), [me])
   const domain = useMemo(() => baseDomain(), [])
+  const myGroups = useMemo(
+    () =>
+      new Set(
+        (me?.groups ?? "")
+          .split(",")
+          .map((g) => g.trim())
+          .filter(Boolean)
+      ),
+    [me]
+  )
+  const canAccess = (e: CatalogEntry) =>
+    !e.groups?.length || e.groups.some((g) => myGroups.has(g))
   const instName = (e: CatalogEntry) => `ws-${e.id}-${slug}`
   const instUrl = (e: CatalogEntry) => `https://${instName(e)}.${domain}`
   const depPath = (e: CatalogEntry) =>
@@ -195,16 +207,46 @@ export function App() {
     return () => clearInterval(t)
   }, [me])
 
+  // Restore open sessions from the cluster: the per-user instances are the
+  // source of truth, so a refresh keeps the top-bar tabs (and the last active
+  // one). Tabs that were closed (pods deleted) stay gone.
+  useEffect(() => {
+    if (!me || !entries.length) return
+    ;(async () => {
+      try {
+        const list = await readJson(
+          `/apis/apps/v1/namespaces/services/deployments?labelSelector=chacdn-owner%3D${slug}`
+        )
+        const items: { metadata: { name: string } }[] = list.items ?? []
+        const openIds = items
+          .map((d) => d.metadata.name)
+          .filter((n) => n.startsWith("ws-") && n.endsWith(`-${slug}`))
+          .map((n) => n.slice(3, n.length - slug.length - 1))
+        const restored = entries.filter(
+          (e) => canAccess(e) && openIds.includes(e.id)
+        )
+        setWorkspaces(restored)
+        const last = localStorage.getItem("chacdn-active")
+        setActiveId(
+          last && restored.some((w) => w.id === last)
+            ? last
+            : (restored[0]?.id ?? null)
+        )
+      } catch {
+        // not fatal: start with an empty top bar
+      }
+    })()
+  }, [me, entries, slug])
+
+  // Remember which tab was active so a refresh lands back on it.
+  useEffect(() => {
+    if (activeId) localStorage.setItem("chacdn-active", activeId)
+  }, [activeId])
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
-    const myGroups = new Set(
-      (me?.groups ?? "").split(",").map((g) => g.trim()).filter(Boolean)
-    )
     return entries.filter((e) => {
-      if (e.groups && e.groups.length) {
-        const allowed = e.groups.some((g) => myGroups.has(g))
-        if (!allowed) return false
-      }
+      if (!canAccess(e)) return false
       return (
         (filter === "all" || e.type === filter) &&
         (!q ||
@@ -285,7 +327,24 @@ export function App() {
     }
   }
 
-  const closeWorkspace = (id: string) => {
+  const deleteInstance = async (name: string) => {
+    await apiDel(`/apis/apps/v1/namespaces/services/deployments/${name}`)
+    await apiDel(`/api/v1/namespaces/services/services/${name}`)
+    await apiDel(
+      `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${name}`
+    )
+  }
+
+  // Closing a tab really shuts the workspace down (pod + service + route).
+  const closeWorkspace = async (id: string) => {
+    const e = workspaces.find((w) => w.id === id)
+    if (e) {
+      try {
+        await deleteInstance(instName(e))
+      } catch {
+        // best effort; still drop the tab
+      }
+    }
     const rest = workspaces.filter((w) => w.id !== id)
     setWorkspaces(rest)
     if (activeId === id) {
@@ -332,16 +391,12 @@ export function App() {
         `/apis/apps/v1/namespaces/services/deployments?labelSelector=chacdn-owner%3D${slug}`
       )
       for (const d of list.items ?? []) {
-        const n: string = d.metadata.name
-        await apiDel(`/apis/apps/v1/namespaces/services/deployments/${n}`)
-        await apiDel(`/api/v1/namespaces/services/services/${n}`)
-        await apiDel(
-          `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${n}`
-        )
+        await deleteInstance(d.metadata.name as string)
       }
     } catch {
       // best effort
     }
+    localStorage.removeItem("chacdn-active")
     setWorkspaces([])
     setActiveId(null)
   }
