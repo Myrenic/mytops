@@ -22,6 +22,10 @@ spec:
           volumeMounts:
             - name: webui
               mountPath: /usr/share/nginx/html
+            - name: cache
+              mountPath: /var/cache/nginx
+            - name: run
+              mountPath: /var/run
           resources:
             requests:
               cpu: 10m
@@ -42,6 +46,10 @@ spec:
         - name: webui
           configMap:
             name: chacdn-webui
+        - name: cache
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
