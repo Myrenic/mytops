@@ -9,12 +9,6 @@ metadata:
   namespace: services
 spec:
   replicas: 1
-  # Single replica on a memory-tight node: Recreate (not RollingUpdate) so a
-  # restart never needs two pods' requests scheduled at once.
-  strategy:
-    type: Recreate
-    # null clears the server-defaulted rollingUpdate block under SSA
-    rollingUpdate: null
   selector:
     matchLabels:
       app: desktop-ubuntu
@@ -46,7 +40,7 @@ spec:
           resources:
             requests:
               cpu: 250m
-              memory: 512Mi
+              memory: 256Mi
             limits:
               memory: 2Gi
       volumes:
@@ -75,12 +69,6 @@ metadata:
   namespace: services
 spec:
   replicas: 1
-  # Single replica on a memory-tight node: Recreate (not RollingUpdate) so a
-  # restart never needs two pods' requests scheduled at once.
-  strategy:
-    type: Recreate
-    # null clears the server-defaulted rollingUpdate block under SSA
-    rollingUpdate: null
   selector:
     matchLabels:
       app: desktop-fedora
@@ -112,7 +100,7 @@ spec:
           resources:
             requests:
               cpu: 250m
-              memory: 512Mi
+              memory: 256Mi
             limits:
               memory: 2Gi
       volumes:
