@@ -403,8 +403,14 @@ export function App() {
 
   const logout = async () => {
     await teardownAll()
-    const rd = encodeURIComponent(window.location.origin)
-    window.location.href = `https://auth.${domain}/oauth2/sign_out?rd=${rd}`
+    // Chain: oauth2-proxy clears its session cookie, then Keycloak's
+    // end-session endpoint clears the IdP SSO cookie (otherwise the browser
+    // auto-logs-in again via the surviving Keycloak session).
+    const rd = encodeURIComponent(`https://apps.${domain}/`)
+    const kcLogout = encodeURIComponent(
+      `https://keycloak.${domain}/realms/chacdn/protocol/openid-connect/logout?client_id=webui&post_logout_redirect_uri=${rd}`
+    )
+    window.location.href = `https://auth.${domain}/oauth2/sign_out?rd=${kcLogout}`
   }
 
   if (loading) {
