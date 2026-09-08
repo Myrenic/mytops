@@ -229,25 +229,32 @@ export function App() {
     if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`)
   }
 
+  const resourceExists = async (path: string) => {
+    try {
+      const obj = await readJson(path)
+      return obj.kind !== "Status" // 404s come back as Status objects
+    } catch {
+      return false
+    }
+  }
+
   const ensureInstance = async (e: CatalogEntry) => {
-    const exists = await (async () => {
-      try {
-        const dep = await readJson(depPath(e))
-        return dep.kind !== "Status" // 404s come back as Status objects
-      } catch {
-        return false
-      }
-    })()
-    if (!exists) {
-      const name = instName(e)
+    const name = instName(e)
+    // Check and create each resource independently: an orphaned Deployment
+    // from an earlier partial connect must not skip Service/IngressRoute
+    // creation (otherwise the host falls through to the Traefik catch-all).
+    if (!(await resourceExists(depPath(e)))) {
       await apiPost(
         "/apis/apps/v1/namespaces/services/deployments",
         deploymentManifest(e, name, slug)
       )
-      await apiPost(
-        "/api/v1/namespaces/services/services",
-        serviceManifest(name)
-      )
+    }
+    const svcPath = `/api/v1/namespaces/services/services/${name}`
+    if (!(await resourceExists(svcPath))) {
+      await apiPost("/api/v1/namespaces/services/services", serviceManifest(name))
+    }
+    const irPath = `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${name}`
+    if (!(await resourceExists(irPath))) {
       await apiPost(
         "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
         ingressManifest(name, domain)
