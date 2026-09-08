@@ -1,7 +1,9 @@
 // Regenerates base/chacdn-webui.configmap.json from the vite output in
-// base/www. Files are stored as binaryData (base64) because the minified
-// bundle contains raw control characters that the kustomize/yaml emitter
-// refuses to write as text data.
+// base/www. The minified JS/CSS are stored as binaryData (base64) because
+// they contain raw control characters that the kustomize/yaml emitter
+// refuses to write as text data. index.html and catalog.json stay as plain
+// data so Flux postBuild substitution can still expand ${SECRET_DOMAIN_0}
+// inside catalog.json (base64 content is opaque to it).
 import { readdir, readFile, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
@@ -10,20 +12,27 @@ const out = resolve(import.meta.dirname, "../../base/chacdn-webui.configmap.json
 
 const files = (await readdir(www)).filter((f) => !f.startsWith("."))
 const binaryData = {}
+const data = {}
 for (const f of files) {
-  binaryData[f] = (await readFile(join(www, f))).toString("base64")
+  const content = await readFile(join(www, f))
+  if (f === "index.html" || f === "catalog.json") {
+    data[f] = content.toString("utf8")
+  } else {
+    binaryData[f] = content.toString("base64")
+  }
 }
 
 const configMap = {
   apiVersion: "v1",
   kind: "ConfigMap",
   metadata: { name: "chacdn-webui" },
-  binaryData,
+  ...(Object.keys(data).length ? { data } : {}),
+  ...(Object.keys(binaryData).length ? { binaryData } : {}),
 }
 
 await writeFile(out, JSON.stringify(configMap, null, 2) + "\n")
 console.log(
   `wrote ${out} (${files.length} files, ${Math.round(
     Buffer.byteLength(await readFile(out)) / 1024
-  )} KiB base64)`
+  )} KiB)`
 )
