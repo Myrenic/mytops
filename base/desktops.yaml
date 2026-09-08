@@ -1,6 +1,6 @@
 # Example Selkies desktops built directly on the linuxserver baseimage.
 # Interim stand-ins until we build our own app/desktop images. Each is a full
-# desktop (labwc + panel); Traefik proxies HTTP port 3000 and auto-upgrades
+# desktop (labwc, no selkies panel); Traefik proxies HTTP port 3000 and auto-upgrades
 # the /websocket stream.
 apiVersion: apps/v1
 kind: Deployment
@@ -33,7 +33,7 @@ spec:
             - name: PIXELFLUX_WAYLAND
               value: "true"
             - name: SELKIES_DESKTOP
-              value: "true"
+              value: "false"
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
@@ -93,7 +93,7 @@ spec:
             - name: PIXELFLUX_WAYLAND
               value: "true"
             - name: SELKIES_DESKTOP
-              value: "true"
+              value: "false"
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
