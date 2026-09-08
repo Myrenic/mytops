@@ -1,0 +1,20 @@
+{
+  "apps": [
+    {
+      "id": "ubuntu-desktop",
+      "name": "Ubuntu Desktop",
+      "description": "Full Ubuntu (labwc) desktop on the Selkies base image.",
+      "type": "desktop",
+      "icon": "🐧",
+      "url": "https://desktop-ubuntu.${SECRET_DOMAIN_0}"
+    },
+    {
+      "id": "fedora-desktop",
+      "name": "Fedora Desktop",
+      "description": "Full Fedora (labwc) desktop on the Selkies base image.",
+      "type": "desktop",
+      "icon": "🌐",
+      "url": "https://desktop-fedora.${SECRET_DOMAIN_0}"
+    }
+  ]
+}

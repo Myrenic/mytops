@@ -4,10 +4,4 @@ kind: Kustomization
 resources:
   - ./webui.yaml
   - ./desktops.yaml
-configMapGenerator:
-  - name: chacdn-webui
-    files:
-      - index.html
-      - catalog.json
-    options:
-      disableNameSuffixHash: true
+  - ./chacdn-webui.configmap.json
