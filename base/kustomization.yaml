@@ -5,4 +5,5 @@ resources:
   - ./webui.yaml
   - ./desktops.yaml
   - ./apps.yaml
+  - ./control.yaml
   - ./chacdn-webui.configmap.json

@@ -6,6 +6,7 @@
       "description": "Full Ubuntu (labwc) desktop on the Selkies base image.",
       "type": "desktop",
       "icon": "🐧",
+      "deployment": "desktop-ubuntu",
       "url": "https://desktop-ubuntu.${SECRET_DOMAIN_0}"
     },
     {
@@ -14,6 +15,7 @@
       "description": "Full Fedora (labwc) desktop on the Selkies base image.",
       "type": "desktop",
       "icon": "🌐",
+      "deployment": "desktop-fedora",
       "url": "https://desktop-fedora.${SECRET_DOMAIN_0}"
     },
     {
@@ -22,6 +24,7 @@
       "description": "Mozilla Firefox in a single-app Selkies container.",
       "type": "app",
       "icon": "🦊",
+      "deployment": "firefox",
       "url": "https://firefox.${SECRET_DOMAIN_0}"
     }
   ]

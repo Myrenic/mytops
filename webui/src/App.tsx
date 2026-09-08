@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { Monitor, Play, Search, X } from "lucide-react"
+import { Monitor, Play, RotateCw, Search, X } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -20,6 +20,8 @@ interface CatalogEntry {
   type: EntryType
   icon?: string
   url: string
+  /** Name of the k8s Deployment backing this workspace (for restart). */
+  deployment?: string
 }
 
 const FILTERS: { id: EntryType | "all"; label: string }[] = [
@@ -44,6 +46,11 @@ export function App() {
   // catalog card opens/reopens one; the header tabs switch between them.
   const [workspaces, setWorkspaces] = useState<CatalogEntry[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+
+  // Fresh-session restart via the kubectl-proxy sidecar.
+  const [restartingId, setRestartingId] = useState<string | null>(null)
+  const [restartError, setRestartError] = useState<string | null>(null)
+  const [frameNonce, setFrameNonce] = useState(0)
 
   useEffect(() => {
     fetch("catalog.json", { cache: "no-store" })
@@ -83,6 +90,50 @@ export function App() {
     setWorkspaces(rest)
     if (activeId === id) {
       setActiveId(rest.length ? rest[rest.length - 1].id : null)
+    }
+  }
+
+  // Roll the workspace's Deployment (annotation patch -> new ReplicaSet ->
+  // fresh pod), then wait for the new pod to be ready and reload the frame.
+  const restartWorkspace = async (ws: CatalogEntry) => {
+    if (!ws.deployment || restartingId) return
+    setRestartingId(ws.id)
+    setRestartError(null)
+    try {
+      const patchRes = await fetch(
+        `/apis/apps/v1/namespaces/services/deployments/${ws.deployment}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/merge-patch+json" },
+          body: JSON.stringify({
+            spec: {
+              template: {
+                metadata: {
+                  annotations: { "chacdn/restartedAt": new Date().toISOString() },
+                },
+              },
+            },
+          }),
+        }
+      )
+      if (!patchRes.ok) {
+        throw new Error(`restart rejected (HTTP ${patchRes.status})`)
+      }
+      const deadline = Date.now() + 120_000
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000))
+        const dep = await (
+          await fetch(`/apis/apps/v1/namespaces/services/deployments/${ws.deployment}`)
+        ).json()
+        if ((dep.status?.readyReplicas ?? 0) >= (dep.spec?.replicas ?? 1)) {
+          break
+        }
+      }
+      setFrameNonce((n) => n + 1)
+    } catch (err) {
+      setRestartError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRestartingId(null)
     }
   }
 
@@ -148,19 +199,50 @@ export function App() {
             )
           })}
         </nav>
+
+        {active && (
+          <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
+            {restartError && (
+              <span className="max-w-64 truncate text-xs text-destructive" title={restartError}>
+                Restart failed
+              </span>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => restartWorkspace(active)}
+              disabled={restartingId !== null}
+              title="Recreate this workspace with a fresh pod"
+            >
+              <RotateCw
+                className={`size-4 ${restartingId === active.id ? "animate-spin" : ""}`}
+              />
+              <span className="hidden sm:inline">
+                {restartingId === active.id ? "Restarting…" : "Restart"}
+              </span>
+            </Button>
+          </div>
+        )}
       </header>
 
       {active ? (
         // Embedded Selkies workspace; only the active one is mounted so the
         // video stream stops when you switch (the desktop pod keeps running).
-        <div className="min-h-0 flex-1 bg-black">
+        <div className="relative min-h-0 flex-1 bg-black">
           <iframe
-            key={active.id}
+            key={`${active.id}-${frameNonce}`}
             src={active.url}
             title={active.name}
             className="block h-full w-full border-0"
             allow="autoplay; clipboard-read; clipboard-write; display-capture; fullscreen; microphone; pointer-lock"
           />
+          {(restartingId === active.id || restartError) && (
+            <div className="absolute inset-0 z-10 grid place-items-center bg-background/95 text-sm text-muted-foreground">
+              {restartingId === active.id
+                ? "Restarting workspace — this can take a minute…"
+                : `Restart failed: ${restartError}`}
+            </div>
+          )}
         </div>
       ) : (
         <main className="min-h-0 flex-1 overflow-y-auto">

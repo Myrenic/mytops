@@ -13,6 +13,7 @@ spec:
       labels:
         app: chacdn-webui
     spec:
+      serviceAccountName: chacdn-control
       containers:
         - name: webui
           image: nginx:1.27-alpine
@@ -42,6 +43,18 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+        # Proxies the Kubernetes API (RBAC-scoped to the chacdn-control
+        # ServiceAccount) so the SPA can roll a fresh workspace pod.
+        - name: kubectl-proxy
+          image: alpine/k8s:1.36.0
+          command: ["kubectl", "proxy", "--port=8001", "--address=0.0.0.0", "--disable-filter=true"]
+          ports:
+            - name: api
+              containerPort: 8001
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
       volumes:
         - name: webui
           configMap:
@@ -63,3 +76,6 @@ spec:
     - name: http
       port: 80
       targetPort: http
+    - name: api
+      port: 8001
+      targetPort: api

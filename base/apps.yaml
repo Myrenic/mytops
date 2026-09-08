@@ -31,6 +31,8 @@ spec:
               value: "${TZ}"
             - name: PIXELFLUX_WAYLAND
               value: "true"
+            - name: RESTART_APP
+              value: "true"
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
