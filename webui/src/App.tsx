@@ -123,7 +123,7 @@ export function App() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {visible.map((e) => (
               <Card key={e.id} className="flex h-full flex-col">
-                <CardHeader className="flex-row items-center gap-3 space-y-0">
+                <CardHeader className="flex items-center gap-3 space-y-0">
                   <div className="grid size-11 shrink-0 place-items-center rounded-md bg-muted text-2xl">
                     {e.icon || FALLBACK_ICON[e.type]}
                   </div>
