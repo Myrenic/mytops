@@ -12,29 +12,28 @@ import {
 import { Button } from "@/components/ui/button"
 import { useTheme } from "@/components/theme-provider"
 import {
-  apiDel,
-  apiPost,
   baseDomain,
   depPath,
-  deploymentManifest,
-  ingressManifest,
   instName,
-  instUrl,
-  irPath,
   readJson,
-  resourceExists,
-  serviceManifest,
   slugFor,
-  svcPath,
   type CatalogEntry,
   type Me,
   type SessionStatus,
 } from "@/lib/k8s"
+import {
+  createWorkspace,
+  endWorkspace as apiEndWorkspace,
+  fetchCatalog,
+  fetchMe,
+  listWorkspaces,
+  restartWorkspace as apiRestartWorkspace,
+  type Workspace,
+} from "@/lib/workplace"
 import { Dashboard } from "@/views/Dashboard"
 import { SessionView, type OverlayState } from "@/views/SessionView"
 
 const FALLBACK_ICON: Record<string, string> = { desktop: "🖥️", app: "🧩" }
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -44,7 +43,7 @@ export function App() {
   const [query, setQuery] = useState("")
 
   // Open workspaces (per-user instances) + which one is shown in the frame.
-  const [workspaces, setWorkspaces] = useState<CatalogEntry[]>([])
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [startingId, setStartingId] = useState<string | null>(null)
   const [restartingId, setRestartingId] = useState<string | null>(null)
@@ -73,21 +72,10 @@ export function App() {
   const openIds = workspaces.map((w) => w.id)
   const active = workspaces.find((w) => w.id === activeId) ?? null
 
-  const deleteInstance = async (name: string) => {
-    await apiDel(depPath(name))
-    await apiDel(svcPath(name))
-    await apiDel(irPath(name))
-  }
-
   const teardownAll = async () => {
-    if (!slug) return
     try {
-      const list = await readJson(
-        `/apis/apps/v1/namespaces/services/deployments?labelSelector=chacdn-owner%3D${slug}`
-      )
-      for (const d of list.items ?? []) {
-        await deleteInstance(d.metadata.name as string)
-      }
+      const ws = await listWorkspaces()
+      await Promise.allSettled(ws.map((w) => apiEndWorkspace(w.id)))
     } catch {
       // best effort
     }
@@ -98,15 +86,11 @@ export function App() {
     setOverlay(null)
   }
 
-  // Identity + catalog. oauth2-proxy gates the whole host, so /me is JSON
-  // unless the session expired (then it's the login page -> not-json).
+  // Identity + catalog via the workplace API.
   useEffect(() => {
     ;(async () => {
       try {
-        const [m, cat] = await Promise.all([
-          readJson("/me"),
-          readJson("catalog.json", { cache: "no-store" }),
-        ])
+        const [m, cat] = await Promise.all([fetchMe(), fetchCatalog()])
         setMe(m)
         setEntries(Array.isArray(cat.apps) ? cat.apps : [])
         setError(null)
@@ -130,7 +114,7 @@ export function App() {
     if (!me) return
     const t = setInterval(async () => {
       try {
-        await readJson("/me")
+        await fetchMe()
       } catch {
         await teardownAll()
         window.location.reload()
@@ -139,39 +123,32 @@ export function App() {
     return () => clearInterval(t)
   }, [me])
 
-  // Restore open sessions from the cluster: the per-user instances are the
-  // source of truth, so a refresh keeps the top-bar tabs (and the last active
-  // one). Tabs that were closed (pods deleted) stay gone.
+  // Restore open sessions from the workplace API (server-side source of
+  // truth).  The browser never queries the K8s API for this.
   useEffect(() => {
-    if (!me || !entries.length) return
+    if (!me) return
     ;(async () => {
       try {
-        const list = await readJson(
-          `/apis/apps/v1/namespaces/services/deployments?labelSelector=chacdn-owner%3D${slug}`
-        )
-        const items: { metadata: { name: string } }[] = list.items ?? []
-        const openIds = items
-          .map((d) => d.metadata.name)
-          .filter((n) => n.startsWith("ws-") && n.endsWith(`-${slug}`))
-          .map((n) => n.slice(3, n.length - slug.length - 1))
-        const restored = entries.filter(
-          (e) => canAccess(e) && openIds.includes(e.id)
-        )
-        setWorkspaces(restored)
+        const ws = await listWorkspaces()
+        const accessible = ws.filter((w) => {
+          const entry = entries.find((e) => e.id === w.id)
+          return !entry || canAccess(entry)
+        })
+        setWorkspaces(accessible)
         setStatusById(
-          Object.fromEntries(restored.map((e) => [e.id, "running"]))
+          Object.fromEntries(accessible.map((w) => [w.id, w.status]))
         )
         const last = localStorage.getItem("chacdn-active")
         setActiveId(
-          last && restored.some((w) => w.id === last)
+          last && accessible.some((w) => w.id === last)
             ? last
-            : (restored[0]?.id ?? null)
+            : (accessible[0]?.id ?? null)
         )
       } catch {
         // not fatal: start with an empty top bar
       }
     })()
-  }, [me, entries, slug])
+  }, [me, entries])
 
   // Remember which tab was active so a refresh lands back on it.
   useEffect(() => {
@@ -180,6 +157,7 @@ export function App() {
 
   // Poll the live status of open workspaces so tiles/tabs reflect reality
   // (e.g. a pod that died or finished restarting) without a page reload.
+  // Uses the direct K8s API (read-only) for efficiency.
   useEffect(() => {
     if (!slug || workspaces.length === 0) return
     const poll = async () => {
@@ -214,42 +192,6 @@ export function App() {
     return () => clearInterval(t)
   }, [slug, workspaces])
 
-  const ensureInstance = async (
-    e: CatalogEntry,
-    onPhase: (title: string, detail: string) => void
-  ) => {
-    const name = instName(e.id, slug)
-    // Check and create each resource independently: an orphaned Deployment
-    // from an earlier partial connect must not skip Service/IngressRoute
-    // creation (otherwise the host falls through to the Traefik catch-all).
-    if (!(await resourceExists(depPath(name)))) {
-      onPhase("Provisioning workspace…", "Creating the workspace container.")
-      await apiPost(
-        "/apis/apps/v1/namespaces/services/deployments",
-        deploymentManifest(e, name, slug)
-      )
-    }
-    const svc = svcPath(name)
-    if (!(await resourceExists(svc))) {
-      await apiPost("/api/v1/namespaces/services/services", serviceManifest(name))
-    }
-    const ir = irPath(name)
-    if (!(await resourceExists(ir))) {
-      await apiPost(
-        "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
-        ingressManifest(name, domain)
-      )
-    }
-    onPhase("Starting workspace…", "Waiting for the container to become ready.")
-    const deadline = Date.now() + 180_000
-    while (Date.now() < deadline) {
-      await sleep(3000)
-      const dep = await readJson(depPath(name))
-      if ((dep.status?.readyReplicas ?? 0) >= 1) return
-    }
-    throw new Error("instance did not become ready")
-  }
-
   const select = (id: string | null) => {
     setOverlay(null)
     setActiveId(id)
@@ -258,14 +200,13 @@ export function App() {
   const connect = async (e: CatalogEntry) => {
     setStartingId(e.id)
     setError(null)
+    setOverlay({ title: `Starting ${e.name}…`, detail: "Provisioning workspace resources." })
     try {
-      await ensureInstance(e, (title, detail) =>
-        setOverlay({ title, detail })
-      )
+      const ws = await createWorkspace(e.id)
       setWorkspaces((prev) =>
-        prev.some((w) => w.id === e.id) ? prev : [...prev, e]
+        prev.some((w) => w.id === e.id) ? prev : [...prev, { ...ws, icon: e.icon }]
       )
-      setStatusById((prev) => ({ ...prev, [e.id]: "running" }))
+      setStatusById((prev) => ({ ...prev, [e.id]: ws.status }))
       setOverlay(null)
       setActiveId(e.id)
     } catch (err) {
@@ -276,15 +217,12 @@ export function App() {
     }
   }
 
-  // Ending a workspace really shuts it down (pod + service + route).
+  // Ending a workspace shuts it down (pod + service + route) via the API.
   const endWorkspace = async (id: string) => {
-    const e = workspaces.find((w) => w.id === id)
-    if (e) {
-      try {
-        await deleteInstance(instName(e.id, slug))
-      } catch {
-        // best effort; still drop the tab
-      }
+    try {
+      await apiEndWorkspace(id)
+    } catch {
+      // best effort; still drop the tab
     }
     const rest = workspaces.filter((w) => w.id !== id)
     setWorkspaces(rest)
@@ -296,37 +234,14 @@ export function App() {
     if (activeId === id) setActiveId(rest.length ? rest[rest.length - 1].id : null)
   }
 
-  const restart = async (e: CatalogEntry) => {
+  const restart = async (e: Workspace) => {
     setRestartingId(e.id)
     setOverlay({
       title: `Restarting ${e.name}…`,
       detail: "This can take a minute.",
     })
     try {
-      const res = await fetch(depPath(instName(e.id, slug)), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/merge-patch+json" },
-        body: JSON.stringify({
-          spec: {
-            template: {
-              metadata: {
-                annotations: { "chacdn/restartedAt": new Date().toISOString() },
-              },
-            },
-          },
-        }),
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      setOverlay({
-        title: `Restarting ${e.name}…`,
-        detail: "Waiting for a fresh container…",
-      })
-      const deadline = Date.now() + 180_000
-      while (Date.now() < deadline) {
-        await sleep(3000)
-        const dep = await readJson(depPath(instName(e.id, slug)))
-        if ((dep.status?.readyReplicas ?? 0) >= 1) break
-      }
+      await apiRestartWorkspace(e.id)
       setFrameNonce((n) => n + 1)
       setOverlay(null)
       setStatusById((prev) => ({ ...prev, [e.id]: "running" }))
@@ -431,7 +346,7 @@ export function App() {
                     <span className={`inline-block size-2 shrink-0 rounded-full ${dot}`} />
                   ) : (
                     <span className="text-sm leading-none">
-                      {w.icon || FALLBACK_ICON[w.type]}
+                      {w.icon || FALLBACK_ICON[w.type] || "🧩"}
                     </span>
                   )}
                 </span>
@@ -469,7 +384,7 @@ export function App() {
                 />
               </Button>
               <a
-                href={instUrl(instName(active.id, slug), domain)}
+                href={active.url}
                 target="_blank"
                 rel="noreferrer"
                 title="Open in a new tab"
@@ -513,8 +428,8 @@ export function App() {
 
       {active ? (
         <SessionView
-          entry={active}
-          instUrl={instUrl(instName(active.id, slug), domain)}
+          entry={{ id: active.id, name: active.name }}
+          instUrl={active.url}
           frameNonce={frameNonce}
           overlay={overlay}
           containerRef={frameRef}
@@ -529,7 +444,10 @@ export function App() {
           query={query}
           onQuery={setQuery}
           onConnect={connect}
-          onRestart={restart}
+          onRestart={(e) => {
+            const ws = workspaces.find((w) => w.id === e.id)
+            if (ws) restart(ws)
+          }}
           onEnd={endWorkspace}
           error={error}
         />

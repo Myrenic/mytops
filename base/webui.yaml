@@ -45,8 +45,45 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+        # Workplace API: validates requests server-side, enforces group ACL,
+        # builds manifests, and provisions workspace resources via the
+        # kubectl-proxy sidecar.  The browser never touches the K8s API.
+        - name: workplace-api
+          image: docker.io/library/node:22-alpine
+          command: ["node", "/etc/chacdn-api/server.mjs"]
+          ports:
+            - name: workplace
+              containerPort: 3001
+          env:
+            - name: KUBE_API
+              value: "http://localhost:8001"
+            - name: WORKSPACE_NAMESPACE
+              value: "services"
+            - name: CATALOG_PATH
+              value: "/etc/chacdn/catalog.json"
+          volumeMounts:
+            - name: api-catalog
+              mountPath: /etc/chacdn
+              readOnly: true
+            - name: api-code
+              mountPath: /etc/chacdn-api
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: workplace
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
         # Proxies the Kubernetes API (RBAC-scoped to the chacdn-control
-        # ServiceAccount) so the SPA can roll a fresh workspace pod.
+        # ServiceAccount) so the workplace-api can provision workspace pods.
         - name: kubectl-proxy
           image: alpine/k8s:1.36.0
           command: ["kubectl", "proxy", "--port=8001", "--address=0.0.0.0", "--disable-filter=true"]
@@ -64,6 +101,12 @@ spec:
         - name: nginx-conf
           configMap:
             name: chacdn-nginx
+        - name: api-catalog
+          configMap:
+            name: chacdn-api-catalog
+        - name: api-code
+          configMap:
+            name: chacdn-workplace-api
         - name: cache
           emptyDir: {}
         - name: run
@@ -81,6 +124,6 @@ spec:
     - name: http
       port: 80
       targetPort: http
-    - name: api
-      port: 8001
-      targetPort: api
+    - name: workplace
+      port: 3001
+      targetPort: workplace

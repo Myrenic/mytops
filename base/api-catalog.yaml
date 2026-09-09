@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chacdn-api-catalog
+  namespace: services
+data:
+  catalog.json: |
+    {
+      "apps": [
+        {
+          "id": "ubuntu-desktop",
+          "name": "Ubuntu Desktop",
+          "description": "Full KDE Plasma desktop (Wayland).",
+          "type": "desktop",
+          "runtime": "container",
+          "persistence": "persistent",
+          "lifecycle": "suspend",
+          "icon": "🐧",
+          "image": "ghcr.io/linuxserver/webtop:ubuntu-kde",
+          "resources": { "cpu": "500m", "memory": "512Mi" },
+          "env": [
+            { "name": "PIXELFLUX_WAYLAND", "value": "true" }
+          ],
+          "groups": ["ubuntu-desktop"]
+        },
+        {
+          "id": "firefox",
+          "name": "Firefox",
+          "description": "Mozilla Firefox in a single-app container.",
+          "type": "app",
+          "runtime": "container",
+          "persistence": "disposable",
+          "lifecycle": "ephemeral",
+          "icon": "🦊",
+          "image": "ghcr.io/linuxserver/firefox:latest",
+          "env": [
+            { "name": "PIXELFLUX_WAYLAND", "value": "true" },
+            { "name": "RESTART_APP", "value": "true" }
+          ],
+          "groups": ["firefox"]
+        }
+      ]
+    }

@@ -1,0 +1,322 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chacdn-workplace-api
+  namespace: services
+data:
+  server.mjs: |
+    // ── Chacdn Workplace API ──────────────────────────────────────────
+    // Server-side workspace provisioning. The browser never touches
+    // the Kubernetes API directly.
+    //
+    // Expects (env):
+    //   KUBE_API     – in-cluster K8s API base (default http://localhost:8001)
+    //   CATALOG_PATH – path to catalog.json (default /etc/chacdn/catalog.json)
+    //   USER_EMAIL   – injected by nginx SSI (from oauth2-proxy header)
+    //   USER_GROUPS  – injected by nginx SSI
+    //
+    // Routes:
+    //   GET  /api/health
+    //   GET  /api/me
+    //   GET  /api/catalog
+    //   GET  /api/workspaces
+    //   POST /api/workspaces        { catalogId }
+    //   DELETE /api/workspaces/:id
+    //   POST /api/workspaces/:id/restart
+
+    import { readFileSync } from "node:fs"
+    import { createServer } from "node:http"
+
+    const KUBE_API = process.env.KUBE_API || "http://localhost:8001"
+    const CATALOG_PATH = process.env.CATALOG_PATH || "/etc/chacdn/catalog.json"
+    const NAMESPACE = "services"
+    const IR_DOMAIN = process.env.IR_DOMAIN || "" // e.g. apps.home.intra
+
+    let catalog = { apps: [] }
+    try {
+      catalog = JSON.parse(readFileSync(CATALOG_PATH, "utf-8"))
+    } catch {
+      console.warn("workplace-api: could not read catalog, serving empty")
+    }
+
+    // ── K8s helpers ───────────────────────────────────────────────────
+    async function kube(method, path, body) {
+      const opts = {
+        method,
+        headers: { "Content-Type": "application/merge-patch+json" },
+      }
+      if (body) opts.body = JSON.stringify(body)
+      const res = await fetch(`${KUBE_API}${path}`, opts)
+      const text = await res.text()
+      try {
+        return { status: res.status, data: JSON.parse(text) }
+      } catch {
+        return { status: res.status, data: { error: text } }
+      }
+    }
+
+    function slugFor(email) {
+      let h = 0
+      for (const c of email.toLowerCase()) h = (h * 31 + c.charCodeAt(0)) >>> 0
+      return "u" + (h >>> 0).toString(16).padStart(8, "0")
+    }
+
+    function instName(entryId, slug) {
+      return `ws-${entryId}-${slug}`
+    }
+
+    function depPath(name) {
+      return `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/${name}`
+    }
+
+    function svcPath(name) {
+      return `/api/v1/namespaces/${NAMESPACE}/services/${name}`
+    }
+
+    function irPath(name) {
+      return `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${name}`
+    }
+
+    function domainForHost(host) {
+      const parts = host.split(".")
+      return parts.length > 1 ? parts.slice(1).join(".") : host
+    }
+
+    function baseDomain() {
+      return IR_DOMAIN || domainForHost("apps.home.intra")
+    }
+
+    // ── Manifest builders ─────────────────────────────────────────────
+    function deploymentManifest(entry, name, slug) {
+      const domain = baseDomain()
+      return {
+        apiVersion: "apps/v1",
+        kind: "Deployment",
+        metadata: {
+          name,
+          namespace: NAMESPACE,
+          labels: {
+            "app.kubernetes.io/name": "chacdn",
+            "app.kubernetes.io/component": "session",
+            "chacdn-owner": slug,
+            "chacdn-entry": entry.id,
+          },
+        },
+        spec: {
+          replicas: 1,
+          selector: { matchLabels: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session", "chacdn-owner": slug, "chacdn-entry": entry.id } },
+          template: {
+            metadata: {
+              labels: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session", "chacdn-owner": slug, "chacdn-entry": entry.id },
+              annotations: { "chacdn/restartedAt": new Date().toISOString() },
+            },
+            spec: {
+              automountServiceAccountToken: false,
+              securityContext: { runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, runAsNonRoot: true, seccompProfile: { type: "RuntimeDefault" } },
+              containers: [
+                {
+                  name: "selkies",
+                  image: entry.image,
+                  ports: [{ name: "http", containerPort: 8080 }],
+                  env: [
+                    { name: "USER_EMAIL", value: email() },
+                    { name: "USER_GROUPS", value: groups() },
+                    ...(entry.env ?? []),
+                  ],
+                  readinessProbe: { httpGet: { path: "/", port: 8080 }, periodSeconds: 10 },
+                  resources: { cpu: { request: entry.resources?.cpu || "250m", limit: entry.resources?.cpu || "2" }, memory: { request: entry.resources?.memory || "512Mi", limit: entry.resources?.memory || "4Gi" } },
+                  securityContext: {
+                    allowPrivilegeEscalation: false,
+                    capabilities: { drop: ["ALL"] },
+                    readOnlyRootFilesystem: false,
+                    runAsNonRoot: true,
+                    seccompProfile: { type: "RuntimeDefault" },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }
+    }
+
+    function serviceManifest(name) {
+      return {
+        apiVersion: "v1",
+        kind: "Service",
+        metadata: {
+          name,
+          namespace: NAMESPACE,
+          labels: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session" },
+        },
+        spec: {
+          selector: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session", "chacdn-owner": slugFor(email()), "chacdn-entry": name.replace(/^ws-/, "").replace(new RegExp(`-${slugFor(email())}$`), "") },
+          ports: [{ name: "http", port: 80, targetPort: 8080 }],
+        },
+      }
+    }
+
+    function ingressManifest(name, domain) {
+      return {
+        apiVersion: "traefik.io/v1alpha1",
+        kind: "IngressRoute",
+        metadata: {
+          name,
+          namespace: "network",
+          labels: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session" },
+        },
+        spec: {
+          entryPoints: ["websecure"],
+          routes: [
+            { match: `Host(\`${name}.apps.${domain}\`)`, kind: "Rule", services: [{ name, namespace: NAMESPACE, port: 80 }] },
+          ],
+        },
+      }
+    }
+
+    function email() {
+      return process.env.USER_EMAIL || ""
+    }
+
+    function groups() {
+      return process.env.USER_GROUPS || ""
+    }
+
+    async function resourceExists(path) {
+      const { status, data } = await kube("GET", path)
+      return status === 200 && data.kind !== "Status"
+    }
+
+    // ── HTTP server ───────────────────────────────────────────────────
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url, `http://${req.headers.host}`)
+      const method = req.method
+
+      const json = (code, data) => {
+        res.writeHead(code, { "Content-Type": "application/json" })
+        res.end(JSON.stringify(data))
+      }
+
+      try {
+        // Health
+        if (url.pathname === "/api/health" && method === "GET") {
+          return json(200, { ok: true })
+        }
+
+        // Me (echo SSI headers)
+        if (url.pathname === "/api/me" && method === "GET") {
+          return json(200, { email: email(), groups: groups() })
+        }
+
+        // Catalog
+        if (url.pathname === "/api/catalog" && method === "GET") {
+          return json(200, catalog)
+        }
+
+        // List workspaces
+        if (url.pathname === "/api/workspaces" && method === "GET") {
+          const slug = slugFor(email())
+          const { status, data } = await kube("GET", `/apis/apps/v1/namespaces/${NAMESPACE}/deployments?labelSelector=chacdn-owner%3D${slug}`)
+          if (status !== 200) return json(status, data)
+
+          const workspaces = (data.items ?? [])
+            .filter((d) => d.metadata?.name?.startsWith("ws-"))
+            .map((d) => {
+              const name = d.metadata.name
+              const entryId = name.slice(3, name.length - slug.length - 1)
+              const entry = catalog.apps.find((a) => a.id === entryId)
+              const ready = (d.status?.readyReplicas ?? 0) >= 1
+              return {
+                id: entryId,
+                name: entry?.name ?? entryId,
+                type: entry?.type ?? "app",
+                icon: entry?.icon,
+                status: ready ? "running" : "starting",
+                url: `https://${name}.apps.${baseDomain()}`,
+              }
+            })
+
+          return json(200, workspaces)
+        }
+
+        // Create workspace
+        if (url.pathname === "/api/workspaces" && method === "POST") {
+          const body = await readBody(req)
+          const { catalogId } = JSON.parse(body)
+          if (!catalogId) return json(400, { error: "catalogId required" })
+
+          const entry = catalog.apps.find((a) => a.id === catalogId)
+          if (!entry) return json(404, { error: "catalog entry not found" })
+
+          const slug = slugFor(email())
+          const name = instName(entry.id, slug)
+          const domain = baseDomain()
+
+          // Create each resource independently (partial-apply recovery)
+          if (!(await resourceExists(depPath(name)))) {
+            await kube("POST", "/apis/apps/v1/namespaces/services/deployments", deploymentManifest(entry, name, slug))
+          }
+          if (!(await resourceExists(svcPath(name)))) {
+            await kube("POST", "/api/v1/namespaces/services/services", serviceManifest(name))
+          }
+          if (!(await resourceExists(irPath(name)))) {
+            await kube("POST", `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes`, ingressManifest(name, domain))
+          }
+
+          return json(200, {
+            id: entry.id,
+            name: entry.name,
+            type: entry.type,
+            icon: entry.icon,
+            status: "starting",
+            url: `https://${name}.apps.${domain}`,
+          })
+        }
+
+        // Restart / End workspace
+        const wsMatch = url.pathname.match(/^\/api\/workspaces\/(.+)$/)
+        if (wsMatch) {
+          const entryId = decodeURIComponent(wsMatch[1])
+          const slug = slugFor(email())
+          const name = instName(entryId, slug)
+
+          if (method === "POST") {
+            // Rolling restart
+            const { status, data } = await kube("PATCH", depPath(name), {
+              spec: { template: { metadata: { annotations: { "chacdn/restartedAt": new Date().toISOString() } } } },
+            })
+            if (status !== 200) return json(status, data)
+            return json(200, { ok: true })
+          }
+
+          if (method === "DELETE") {
+            // Best-effort cleanup: Deployment + Service + IngressRoute
+            await Promise.allSettled([
+              kube("DELETE", depPath(name)),
+              kube("DELETE", svcPath(name)),
+              kube("DELETE", irPath(name)),
+            ])
+            return json(200, { ok: true })
+          }
+        }
+
+        json(404, { error: "not found" })
+      } catch (err) {
+        console.error("workplace-api:", err)
+        json(500, { error: err.message })
+      }
+    })
+
+    function readBody(req) {
+      return new Promise((resolve, reject) => {
+        let data = ""
+        req.on("data", (chunk) => (data += chunk))
+        req.on("end", () => resolve(data))
+        req.on("error", reject)
+      })
+    }
+
+    const PORT = process.env.PORT || 3001
+    server.listen(PORT, () => {
+      console.log(`workplace-api listening on :${PORT}`)
+    })

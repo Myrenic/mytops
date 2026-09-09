@@ -1,14 +1,18 @@
 import { Loader2 } from "lucide-react"
 import type { Ref } from "react"
-import { type CatalogEntry } from "@/lib/k8s"
 
 export interface OverlayState {
   title: string
   detail: string
 }
 
+interface SessionEntry {
+  id: string
+  name: string
+}
+
 interface SessionViewProps {
-  entry: CatalogEntry
+  entry: SessionEntry
   instUrl: string
   frameNonce: number
   overlay: OverlayState | null

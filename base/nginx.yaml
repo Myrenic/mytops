@@ -1,5 +1,5 @@
-# Custom nginx config for the webui: SPA fallback + /me identity endpoint
-# that echoes the oauth2-proxy identity headers via SSI.
+# Custom nginx config for the webui: SPA fallback, /me identity endpoint
+# (oauth2-proxy SSI), and /api proxy to the workplace-api sidecar.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,6 +12,14 @@ data:
         server_name _;
         root /usr/share/nginx/html;
         index index.html;
+
+        # Workplace API: server-side validated workspace provisioning.
+        location /api/ {
+            proxy_pass http://127.0.0.1:3001;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
 
         location / {
             try_files $uri $uri/ /index.html;

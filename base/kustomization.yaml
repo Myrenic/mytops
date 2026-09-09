@@ -5,4 +5,6 @@ resources:
   - ./webui.yaml
   - ./control.yaml
   - ./nginx.yaml
+  - ./api-catalog.yaml
+  - ./workplace-api-configmap.yaml
   - ./chacdn-webui.configmap.json
