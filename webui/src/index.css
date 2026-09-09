@@ -48,72 +48,72 @@
 }
 
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
+    --background: oklch(0.97 0.006 265);
+    --foreground: oklch(0.21 0.02 265);
     --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
+    --card-foreground: oklch(0.21 0.02 265);
     --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
+    --popover-foreground: oklch(0.21 0.02 265);
+    --primary: oklch(0.48 0.16 262);
+    --primary-foreground: oklch(0.985 0.005 265);
+    --secondary: oklch(0.92 0.01 265);
+    --secondary-foreground: oklch(0.3 0.02 265);
+    --muted: oklch(0.94 0.008 265);
+    --muted-foreground: oklch(0.5 0.02 265);
+    --accent: oklch(0.93 0.02 262);
+    --accent-foreground: oklch(0.35 0.05 262);
+    --destructive: oklch(0.55 0.22 25);
+    --border: oklch(0.9 0.01 265);
+    --input: oklch(0.9 0.01 265);
+    --ring: oklch(0.48 0.16 262);
+    --chart-1: oklch(0.55 0.16 262);
+    --chart-2: oklch(0.6 0.14 175);
+    --chart-3: oklch(0.65 0.13 90);
+    --chart-4: oklch(0.62 0.16 45);
+    --chart-5: oklch(0.55 0.18 325);
     --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    --sidebar: oklch(0.98 0.005 265);
+    --sidebar-foreground: oklch(0.21 0.02 265);
+    --sidebar-primary: oklch(0.48 0.16 262);
+    --sidebar-primary-foreground: oklch(0.985 0.005 265);
+    --sidebar-accent: oklch(0.93 0.02 262);
+    --sidebar-accent-foreground: oklch(0.35 0.05 262);
+    --sidebar-border: oklch(0.9 0.01 265);
+    --sidebar-ring: oklch(0.48 0.16 262);
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    --background: oklch(0.17 0.018 265);
+    --foreground: oklch(0.95 0.006 265);
+    --card: oklch(0.21 0.02 265);
+    --card-foreground: oklch(0.95 0.006 265);
+    --popover: oklch(0.225 0.02 265);
+    --popover-foreground: oklch(0.95 0.006 265);
+    --primary: oklch(0.63 0.15 260);
+    --primary-foreground: oklch(0.16 0.03 262);
+    --secondary: oklch(0.27 0.02 265);
+    --secondary-foreground: oklch(0.95 0.006 265);
+    --muted: oklch(0.25 0.018 265);
+    --muted-foreground: oklch(0.68 0.015 265);
+    --accent: oklch(0.28 0.03 262);
+    --accent-foreground: oklch(0.95 0.01 265);
+    --destructive: oklch(0.7 0.19 24);
+    --border: oklch(1 0 0 / 9%);
+    --input: oklch(1 0 0 / 14%);
+    --ring: oklch(0.63 0.15 260);
+    --chart-1: oklch(0.68 0.14 260);
+    --chart-2: oklch(0.65 0.13 175);
+    --chart-3: oklch(0.72 0.12 90);
+    --chart-4: oklch(0.68 0.15 45);
+    --chart-5: oklch(0.65 0.16 325);
+    --sidebar: oklch(0.19 0.018 265);
+    --sidebar-foreground: oklch(0.95 0.006 265);
+    --sidebar-primary: oklch(0.63 0.15 260);
+    --sidebar-primary-foreground: oklch(0.16 0.03 262);
+    --sidebar-accent: oklch(0.27 0.02 265);
+    --sidebar-accent-foreground: oklch(0.95 0.006 265);
+    --sidebar-border: oklch(1 0 0 / 9%);
+    --sidebar-ring: oklch(0.63 0.15 260);
 }
 
 @layer base {
@@ -126,4 +126,42 @@
   html {
     @apply font-sans;
     }
+}
+
+/* Slim, subtle scrollbars for the dashboard / tab strip. */
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklch, var(--muted-foreground) 40%, transparent)
+      transparent;
+  }
+}
+
+/* Status dots. */
+.dot-running {
+  background: oklch(0.72 0.17 155);
+  box-shadow: 0 0 0 3px oklch(0.72 0.17 155 / 20%);
+}
+.dot-starting {
+  background: oklch(0.8 0.13 85);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.dot-offline {
+  background: oklch(0.55 0.05 265);
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Soft glow behind the dashboard hero. */
+.hero-glow {
+  background:
+    radial-gradient(600px 220px at 15% -10%, oklch(0.63 0.15 260 / 0.18), transparent 70%),
+    radial-gradient(500px 200px at 85% -10%, oklch(0.68 0.14 175 / 0.1), transparent 70%);
+}
+.dark .hero-glow {
+  background:
+    radial-gradient(600px 220px at 15% -10%, oklch(0.63 0.15 260 / 0.28), transparent 70%),
+    radial-gradient(500px 200px at 85% -10%, oklch(0.68 0.14 175 / 0.16), transparent 70%);
 }

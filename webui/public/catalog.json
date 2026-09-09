@@ -5,8 +5,12 @@
       "name": "Ubuntu Desktop",
       "description": "Full KDE Plasma desktop (Wayland).",
       "type": "desktop",
+      "runtime": "container",
+      "persistence": "persistent",
+      "lifecycle": "suspend",
       "icon": "🐧",
       "image": "ghcr.io/linuxserver/webtop:ubuntu-kde",
+      "resources": { "cpu": "500m", "memory": "512Mi" },
       "env": [
         {
           "name": "PIXELFLUX_WAYLAND",
@@ -22,6 +26,9 @@
       "name": "Firefox",
       "description": "Mozilla Firefox in a single-app container.",
       "type": "app",
+      "runtime": "container",
+      "persistence": "disposable",
+      "lifecycle": "ephemeral",
       "icon": "🦊",
       "image": "ghcr.io/linuxserver/firefox:latest",
       "env": [

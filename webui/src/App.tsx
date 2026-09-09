@@ -1,139 +1,40 @@
-import { useEffect, useMemo, useState } from "react"
-import { LogOut, Monitor, Play, RotateCw, Search, X } from "lucide-react"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
-  Card,
-  CardContent,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
+  ExternalLink,
+  LogOut,
+  Maximize,
+  Monitor,
+  Moon,
+  RotateCw,
+  Sun,
+  X,
+} from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { useTheme } from "@/components/theme-provider"
+import {
+  apiDel,
+  apiPost,
+  baseDomain,
+  depPath,
+  deploymentManifest,
+  ingressManifest,
+  instName,
+  instUrl,
+  irPath,
+  readJson,
+  resourceExists,
+  serviceManifest,
+  slugFor,
+  svcPath,
+  type CatalogEntry,
+  type Me,
+  type SessionStatus,
+} from "@/lib/k8s"
+import { Dashboard } from "@/views/Dashboard"
+import { SessionView, type OverlayState } from "@/views/SessionView"
 
-type EntryType = "desktop" | "app"
-
-interface CatalogEntry {
-  id: string
-  name: string
-  description?: string
-  type: EntryType
-  icon?: string
-  /** selkies image to launch a per-user instance from */
-  image: string
-  env?: { name: string; value: string }[]
-  /** Keycloak groups allowed to see/launch this entry; empty = everyone */
-  groups?: string[]
-}
-
-interface Me {
-  email: string
-  groups: string
-}
-
-const FILTERS: { id: EntryType | "all"; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "desktop", label: "Desktops" },
-  { id: "app", label: "Apps" },
-]
-
-const FALLBACK_ICON: Record<EntryType, string> = {
-  desktop: "🖥️",
-  app: "🧩",
-}
-
-// Stable per-user suffix so the same user reuses their instances.
-function slugFor(email: string): string {
-  let h = 0
-  for (const c of email.toLowerCase()) h = (h * 31 + c.charCodeAt(0)) >>> 0
-  return "u" + (h >>> 0).toString(16).padStart(8, "0")
-}
-
-function baseDomain(): string {
-  const parts = window.location.hostname.split(".")
-  return parts.length > 1 ? parts.slice(1).join(".") : window.location.hostname
-}
-
-async function readJson(path: string, init?: RequestInit): Promise<any> {
-  const res = await fetch(path, init)
-  const ct = res.headers.get("content-type") ?? ""
-  if (!ct.includes("application/json")) {
-    throw new Error("not-json")
-  }
-  return res.json()
-}
-
-function deploymentManifest(entry: CatalogEntry, name: string, owner: string): any {
-  return {
-    apiVersion: "apps/v1",
-    kind: "Deployment",
-    metadata: {
-      name,
-      namespace: "services",
-      labels: { app: name, "chacdn-owner": owner },
-    },
-    spec: {
-      replicas: 1,
-      selector: { matchLabels: { app: name } },
-      template: {
-        metadata: { labels: { app: name } },
-        spec: {
-          containers: [
-            {
-              name: "workspace",
-              image: entry.image,
-              ports: [{ name: "http", containerPort: 3000 }],
-              env: [
-                { name: "PUID", value: "1000" },
-                { name: "PGID", value: "1000" },
-                ...(entry.env ?? []),
-              ],
-              volumeMounts: [{ name: "dshm", mountPath: "/dev/shm" }],
-              resources: {
-                requests: { cpu: "250m", memory: "256Mi" },
-                limits: { memory: entry.type === "desktop" ? "4Gi" : "2Gi" },
-              },
-            },
-          ],
-          volumes: [
-            { name: "dshm", emptyDir: { medium: "Memory", sizeLimit: "1Gi" } },
-          ],
-        },
-      },
-    },
-  }
-}
-
-function serviceManifest(name: string): any {
-  return {
-    apiVersion: "v1",
-    kind: "Service",
-    metadata: { name, namespace: "services" },
-    spec: {
-      selector: { app: name },
-      ports: [{ name: "http", port: 3000, targetPort: "http" }],
-    },
-  }
-}
-
-function ingressManifest(name: string, domain: string): any {
-  return {
-    apiVersion: "traefik.io/v1alpha1",
-    kind: "IngressRoute",
-    metadata: { name, namespace: "network" },
-    spec: {
-      entryPoints: ["websecure"],
-      routes: [
-        {
-          match: `Host(\`${name}.${domain}\`)`,
-          kind: "Rule",
-          services: [{ name, namespace: "services", port: 3000 }],
-        },
-      ],
-      tls: { secretName: "domain-0-prod-tls" },
-    },
-  }
-}
+const FALLBACK_ICON: Record<string, string> = { desktop: "🖥️", app: "🧩" }
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -141,15 +42,19 @@ export function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState("")
-  const [filter, setFilter] = useState<EntryType | "all">("all")
 
   // Open workspaces (per-user instances) + which one is shown in the frame.
   const [workspaces, setWorkspaces] = useState<CatalogEntry[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [startingId, setStartingId] = useState<string | null>(null)
   const [restartingId, setRestartingId] = useState<string | null>(null)
-  const [restartError, setRestartError] = useState<string | null>(null)
+  const [overlay, setOverlay] = useState<OverlayState | null>(null)
+  const [statusById, setStatusById] = useState<Record<string, SessionStatus>>(
+    {}
+  )
   const [frameNonce, setFrameNonce] = useState(0)
+  const frameRef = useRef<HTMLDivElement>(null)
+  const { theme, setTheme } = useTheme()
 
   const slug = useMemo(() => (me ? slugFor(me.email) : ""), [me])
   const domain = useMemo(() => baseDomain(), [])
@@ -165,10 +70,33 @@ export function App() {
   )
   const canAccess = (e: CatalogEntry) =>
     !e.groups?.length || e.groups.some((g) => myGroups.has(g))
-  const instName = (e: CatalogEntry) => `ws-${e.id}-${slug}`
-  const instUrl = (e: CatalogEntry) => `https://${instName(e)}.${domain}`
-  const depPath = (e: CatalogEntry) =>
-    `/apis/apps/v1/namespaces/services/deployments/${instName(e)}`
+  const openIds = workspaces.map((w) => w.id)
+  const active = workspaces.find((w) => w.id === activeId) ?? null
+
+  const deleteInstance = async (name: string) => {
+    await apiDel(depPath(name))
+    await apiDel(svcPath(name))
+    await apiDel(irPath(name))
+  }
+
+  const teardownAll = async () => {
+    if (!slug) return
+    try {
+      const list = await readJson(
+        `/apis/apps/v1/namespaces/services/deployments?labelSelector=chacdn-owner%3D${slug}`
+      )
+      for (const d of list.items ?? []) {
+        await deleteInstance(d.metadata.name as string)
+      }
+    } catch {
+      // best effort
+    }
+    localStorage.removeItem("chacdn-active")
+    setWorkspaces([])
+    setStatusById({})
+    setActiveId(null)
+    setOverlay(null)
+  }
 
   // Identity + catalog. oauth2-proxy gates the whole host, so /me is JSON
   // unless the session expired (then it's the login page -> not-json).
@@ -183,9 +111,13 @@ export function App() {
         setEntries(Array.isArray(cat.apps) ? cat.apps : [])
         setError(null)
       } catch (err) {
-        setError(err instanceof Error && err.message === "not-json"
-          ? "You are not signed in."
-          : err instanceof Error ? err.message : String(err))
+        setError(
+          err instanceof Error && err.message === "not-json"
+            ? "You are not signed in."
+            : err instanceof Error
+              ? err.message
+              : String(err)
+        )
       } finally {
         setLoading(false)
       }
@@ -226,6 +158,9 @@ export function App() {
           (e) => canAccess(e) && openIds.includes(e.id)
         )
         setWorkspaces(restored)
+        setStatusById(
+          Object.fromEntries(restored.map((e) => [e.id, "running"]))
+        )
         const last = localStorage.getItem("chacdn-active")
         setActiveId(
           last && restored.some((w) => w.id === last)
@@ -243,120 +178,132 @@ export function App() {
     if (activeId) localStorage.setItem("chacdn-active", activeId)
   }, [activeId])
 
-  const visible = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return entries.filter((e) => {
-      if (!canAccess(e)) return false
-      return (
-        (filter === "all" || e.type === filter) &&
-        (!q ||
-          (e.name + " " + (e.description ?? "")).toLowerCase().includes(q))
-      )
-    })
-  }, [entries, query, filter, me])
-
-  const active = workspaces.find((w) => w.id === activeId) ?? null
-
-  const apiPost = async (path: string, body: unknown) => {
-    const res = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })
-    if (!res.ok && res.status !== 409) throw new Error(`HTTP ${res.status}`)
-  }
-
-  const apiDel = async (path: string) => {
-    const res = await fetch(path, { method: "DELETE" })
-    if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`)
-  }
-
-  const resourceExists = async (path: string) => {
-    try {
-      const obj = await readJson(path)
-      return obj.kind !== "Status" // 404s come back as Status objects
-    } catch {
-      return false
+  // Poll the live status of open workspaces so tiles/tabs reflect reality
+  // (e.g. a pod that died or finished restarting) without a page reload.
+  useEffect(() => {
+    if (!slug || workspaces.length === 0) return
+    const poll = async () => {
+      for (const w of workspaces) {
+        try {
+          const dep = await readJson(depPath(instName(w.id, slug)))
+          if (dep.kind === "Status") {
+            // 404: terminated externally -> drop the tab like a manual close
+            setWorkspaces((prev) => prev.filter((x) => x.id !== w.id))
+            setStatusById((prev) => {
+              const c = { ...prev }
+              delete c[w.id]
+              return c
+            })
+            setActiveId((prev) =>
+              prev === w.id ? (workspaces.filter((x) => x.id !== w.id).at(-1)?.id ?? null) : prev
+            )
+            continue
+          }
+          const ready = (dep.status?.readyReplicas ?? 0) >= 1
+          setStatusById((prev) => ({
+            ...prev,
+            [w.id]: ready ? "running" : "starting",
+          }))
+        } catch {
+          // transient API error; leave status as-is
+        }
+      }
     }
-  }
+    poll()
+    const t = setInterval(poll, 15000)
+    return () => clearInterval(t)
+  }, [slug, workspaces])
 
-  const ensureInstance = async (e: CatalogEntry) => {
-    const name = instName(e)
+  const ensureInstance = async (
+    e: CatalogEntry,
+    onPhase: (title: string, detail: string) => void
+  ) => {
+    const name = instName(e.id, slug)
     // Check and create each resource independently: an orphaned Deployment
     // from an earlier partial connect must not skip Service/IngressRoute
     // creation (otherwise the host falls through to the Traefik catch-all).
-    if (!(await resourceExists(depPath(e)))) {
+    if (!(await resourceExists(depPath(name)))) {
+      onPhase("Provisioning workspace…", "Creating the workspace container.")
       await apiPost(
         "/apis/apps/v1/namespaces/services/deployments",
         deploymentManifest(e, name, slug)
       )
     }
-    const svcPath = `/api/v1/namespaces/services/services/${name}`
-    if (!(await resourceExists(svcPath))) {
+    const svc = svcPath(name)
+    if (!(await resourceExists(svc))) {
       await apiPost("/api/v1/namespaces/services/services", serviceManifest(name))
     }
-    const irPath = `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${name}`
-    if (!(await resourceExists(irPath))) {
+    const ir = irPath(name)
+    if (!(await resourceExists(ir))) {
       await apiPost(
         "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
         ingressManifest(name, domain)
       )
     }
+    onPhase("Starting workspace…", "Waiting for the container to become ready.")
     const deadline = Date.now() + 180_000
     while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 3000))
-      const dep = await readJson(depPath(e))
+      await sleep(3000)
+      const dep = await readJson(depPath(name))
       if ((dep.status?.readyReplicas ?? 0) >= 1) return
     }
     throw new Error("instance did not become ready")
+  }
+
+  const select = (id: string | null) => {
+    setOverlay(null)
+    setActiveId(id)
   }
 
   const connect = async (e: CatalogEntry) => {
     setStartingId(e.id)
     setError(null)
     try {
-      await ensureInstance(e)
+      await ensureInstance(e, (title, detail) =>
+        setOverlay({ title, detail })
+      )
       setWorkspaces((prev) =>
         prev.some((w) => w.id === e.id) ? prev : [...prev, e]
       )
+      setStatusById((prev) => ({ ...prev, [e.id]: "running" }))
+      setOverlay(null)
       setActiveId(e.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      setOverlay(null)
     } finally {
       setStartingId(null)
     }
   }
 
-  const deleteInstance = async (name: string) => {
-    await apiDel(`/apis/apps/v1/namespaces/services/deployments/${name}`)
-    await apiDel(`/api/v1/namespaces/services/services/${name}`)
-    await apiDel(
-      `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${name}`
-    )
-  }
-
-  // Closing a tab really shuts the workspace down (pod + service + route).
-  const closeWorkspace = async (id: string) => {
+  // Ending a workspace really shuts it down (pod + service + route).
+  const endWorkspace = async (id: string) => {
     const e = workspaces.find((w) => w.id === id)
     if (e) {
       try {
-        await deleteInstance(instName(e))
+        await deleteInstance(instName(e.id, slug))
       } catch {
         // best effort; still drop the tab
       }
     }
     const rest = workspaces.filter((w) => w.id !== id)
     setWorkspaces(rest)
-    if (activeId === id) {
-      setActiveId(rest.length ? rest[rest.length - 1].id : null)
-    }
+    setStatusById((prev) => {
+      const c = { ...prev }
+      delete c[id]
+      return c
+    })
+    if (activeId === id) setActiveId(rest.length ? rest[rest.length - 1].id : null)
   }
 
   const restart = async (e: CatalogEntry) => {
     setRestartingId(e.id)
-    setRestartError(null)
+    setOverlay({
+      title: `Restarting ${e.name}…`,
+      detail: "This can take a minute.",
+    })
     try {
-      const res = await fetch(depPath(e), {
+      const res = await fetch(depPath(instName(e.id, slug)), {
         method: "PATCH",
         headers: { "Content-Type": "application/merge-patch+json" },
         body: JSON.stringify({
@@ -370,35 +317,27 @@ export function App() {
         }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setOverlay({
+        title: `Restarting ${e.name}…`,
+        detail: "Waiting for a fresh container…",
+      })
       const deadline = Date.now() + 180_000
       while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 3000))
-        const dep = await readJson(depPath(e))
+        await sleep(3000)
+        const dep = await readJson(depPath(instName(e.id, slug)))
         if ((dep.status?.readyReplicas ?? 0) >= 1) break
       }
       setFrameNonce((n) => n + 1)
+      setOverlay(null)
+      setStatusById((prev) => ({ ...prev, [e.id]: "running" }))
     } catch (err) {
-      setRestartError(err instanceof Error ? err.message : String(err))
+      setOverlay({
+        title: "Restart failed",
+        detail: err instanceof Error ? err.message : String(err),
+      })
     } finally {
       setRestartingId(null)
     }
-  }
-
-  const teardownAll = async () => {
-    if (!slug) return
-    try {
-      const list = await readJson(
-        `/apis/apps/v1/namespaces/services/deployments?labelSelector=chacdn-owner%3D${slug}`
-      )
-      for (const d of list.items ?? []) {
-        await deleteInstance(d.metadata.name as string)
-      }
-    } catch {
-      // best effort
-    }
-    localStorage.removeItem("chacdn-active")
-    setWorkspaces([])
-    setActiveId(null)
   }
 
   const logout = async () => {
@@ -413,15 +352,28 @@ export function App() {
     window.location.href = `https://auth.${domain}/oauth2/sign_out?rd=${kcLogout}`
   }
 
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen()
+    } else {
+      frameRef.current?.requestFullscreen?.()
+    }
+  }
+
   if (loading) {
     return (
-      <div className="grid min-h-svh place-items-center bg-background text-sm text-muted-foreground">
-        Signing in…
+      <div className="grid min-h-svh place-items-center bg-background">
+        <div className="flex flex-col items-center gap-4">
+          <span className="grid size-12 place-items-center rounded-xl bg-primary text-primary-foreground">
+            <Monitor className="size-6" />
+          </span>
+          <p className="text-sm text-muted-foreground">Loading your workspaces…</p>
+        </div>
       </div>
     )
   }
 
-  if (error) {
+  if (error && !me) {
     return (
       <div className="grid min-h-svh place-items-center bg-background">
         <div className="flex flex-col items-center gap-4 text-center">
@@ -434,58 +386,65 @@ export function App() {
 
   return (
     <div className="flex h-svh flex-col bg-background text-foreground">
-      {/* Top bar: brand + one tab per open workspace + user */}
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b bg-card px-3">
+      {/* Top bar: brand + one tab per open workspace + actions */}
+      <header className="flex h-12 shrink-0 items-center gap-1 border-b bg-card/80 px-2 backdrop-blur">
         <button
           type="button"
-          onClick={() => setActiveId(null)}
-          title="Browse apps & desktops"
+          onClick={() => select(null)}
+          title="Back to workspace catalog"
           className="flex h-8 shrink-0 items-center gap-2 rounded-md px-2 hover:bg-muted"
         >
-          <span className="grid size-6 shrink-0 place-items-center rounded bg-primary text-primary-foreground">
+          <span className="grid size-7 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground">
             <Monitor className="size-4" />
           </span>
           <span className="hidden text-sm font-semibold sm:inline">
-            Desktops &amp; Apps
+            Chacdn
           </span>
         </button>
 
         <nav className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-1">
           {workspaces.length === 0 && (
             <span className="px-1 text-sm text-muted-foreground">
-              Pick an app or desktop to connect
+              Launch a workspace from the catalog
             </span>
           )}
           {workspaces.map((w) => {
             const isActive = w.id === activeId
+            const status = statusById[w.id] ?? "starting"
+            const dot =
+              status === "running" ? "dot-running" : status === "starting" ? "dot-starting" : "dot-offline"
             return (
               <div
                 key={w.id}
                 role="button"
                 tabIndex={0}
-                onClick={() => setActiveId(w.id)}
-                onKeyDown={(e) => e.key === "Enter" && setActiveId(w.id)}
+                onClick={() => select(w.id)}
+                onKeyDown={(e) => e.key === "Enter" && select(w.id)}
                 className={`flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-sm whitespace-nowrap ${
                   isActive
                     ? "bg-primary text-primary-foreground"
                     : "text-muted-foreground hover:bg-muted hover:text-foreground"
                 }`}
               >
-                <span className="text-sm leading-none">
-                  {w.icon || FALLBACK_ICON[w.type]}
+                <span className="flex items-center gap-1.5">
+                  {status === "starting" ? (
+                    <span className={`inline-block size-2 shrink-0 rounded-full ${dot}`} />
+                  ) : (
+                    <span className="text-sm leading-none">
+                      {w.icon || FALLBACK_ICON[w.type]}
+                    </span>
+                  )}
                 </span>
                 <span className="max-w-40 truncate">{w.name}</span>
                 <span
                   role="button"
-                  title={`Close ${w.name}`}
+                  title={`End ${w.name}`}
                   onClick={(e) => {
                     e.stopPropagation()
-                    closeWorkspace(w.id)
+                    endWorkspace(w.id)
                   }}
                   className={`ml-0.5 grid size-4 shrink-0 place-items-center rounded-sm ${
-                    isActive
-                      ? "hover:bg-primary-foreground/20"
-                      : "hover:bg-muted"
+                    isActive ? "hover:bg-primary-foreground/20" : "hover:bg-muted"
                   }`}
                 >
                   <X className="size-3" />
@@ -495,142 +454,85 @@ export function App() {
           })}
         </nav>
 
-        <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
+        <div className="ml-auto flex shrink-0 items-center gap-1 pl-2">
           {active && (
             <>
-              {restartError && (
-                <span
-                  className="max-w-56 truncate text-xs text-destructive"
-                  title={restartError}
-                >
-                  Restart failed
-                </span>
-              )}
               <Button
-                size="sm"
-                variant="outline"
+                size="icon"
+                variant="ghost"
                 onClick={() => restart(active)}
                 disabled={restartingId !== null}
-                title="Recreate this workspace with a fresh pod"
+                title="Restart this workspace with a fresh pod"
               >
                 <RotateCw
-                  className={`size-4 ${
-                    restartingId === active.id ? "animate-spin" : ""
-                  }`}
+                  className={restartingId === active.id ? "animate-spin" : ""}
                 />
-                <span className="hidden sm:inline">
-                  {restartingId === active.id ? "Restarting…" : "Restart"}
-                </span>
+              </Button>
+              <a
+                href={instUrl(instName(active.id, slug), domain)}
+                target="_blank"
+                rel="noreferrer"
+                title="Open in a new tab"
+                className="grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <ExternalLink className="size-4" />
+              </a>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={toggleFullscreen}
+                title="Fullscreen"
+              >
+                <Maximize className="size-4" />
               </Button>
             </>
           )}
-          <span className="hidden max-w-48 truncate text-xs text-muted-foreground md:inline">
+
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            title="Toggle theme"
+          >
+            {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
+          </Button>
+
+          <span className="hidden max-w-48 truncate px-1 text-xs text-muted-foreground md:inline">
             {me?.email}
           </span>
           <Button
-            size="sm"
+            size="icon"
             variant="ghost"
             onClick={logout}
             title="Sign out and shut down your workspaces"
           >
             <LogOut className="size-4" />
-            <span className="hidden sm:inline">Sign out</span>
           </Button>
         </div>
       </header>
 
       {active ? (
-        // Embedded Selkies workspace; only the active one is mounted so the
-        // video stream stops when you switch (the pod keeps running).
-        <div className="relative min-h-0 flex-1 bg-black">
-          <iframe
-            key={`${active.id}-${frameNonce}`}
-            src={instUrl(active)}
-            title={active.name}
-            className="block h-full w-full border-0"
-            allow="autoplay; clipboard-read; clipboard-write; display-capture; fullscreen; microphone; pointer-lock"
-          />
-          {(restartingId === active.id || restartError) && (
-            <div className="absolute inset-0 z-10 grid place-items-center bg-background/95 text-sm text-muted-foreground">
-              {restartingId === active.id
-                ? "Restarting workspace — this can take a minute…"
-                : `Restart failed: ${restartError}`}
-            </div>
-          )}
-        </div>
+        <SessionView
+          entry={active}
+          instUrl={instUrl(instName(active.id, slug), domain)}
+          frameNonce={frameNonce}
+          overlay={overlay}
+          containerRef={frameRef}
+        />
       ) : (
-        <main className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-6xl px-6 py-6">
-            <div className="flex flex-col gap-4 pb-6 sm:flex-row sm:items-center">
-              <div className="relative w-full sm:max-w-sm">
-                <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search apps and desktops…"
-                  className="pl-9"
-                />
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {FILTERS.map((f) => (
-                  <Button
-                    key={f.id}
-                    variant={filter === f.id ? "default" : "secondary"}
-                    size="sm"
-                    onClick={() => setFilter(f.id)}
-                  >
-                    {f.label}
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            {error ? (
-              <p className="py-12 text-center text-sm text-muted-foreground">
-                {error}
-              </p>
-            ) : visible.length === 0 ? (
-              <p className="py-12 text-center text-sm text-muted-foreground">
-                Nothing assigned to you yet.
-              </p>
-            ) : (
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {visible.map((e) => (
-                  <Card key={e.id} className="flex h-full flex-col">
-                    <CardHeader className="flex items-center gap-3 space-y-0">
-                      <div className="grid size-11 shrink-0 place-items-center rounded-md bg-muted text-2xl">
-                        {e.icon || FALLBACK_ICON[e.type]}
-                      </div>
-                      <CardTitle className="flex-1">{e.name}</CardTitle>
-                      <Badge
-                        variant={e.type === "desktop" ? "secondary" : "outline"}
-                      >
-                        {e.type}
-                      </Badge>
-                    </CardHeader>
-                    <CardContent className="flex-1 text-sm text-muted-foreground">
-                      {e.description}
-                    </CardContent>
-                    <CardFooter>
-                      <Button
-                        className="w-full"
-                        onClick={() => connect(e)}
-                        disabled={startingId === e.id}
-                      >
-                        {startingId === e.id
-                          ? "Starting…"
-                          : workspaces.some((w) => w.id === e.id)
-                            ? "Switch to"
-                            : "Connect"}
-                        <Play className="ml-2 size-4" />
-                      </Button>
-                    </CardFooter>
-                  </Card>
-                ))}
-              </div>
-            )}
-          </div>
-        </main>
+        <Dashboard
+          email={me?.email ?? ""}
+          entries={entries.filter(canAccess)}
+          openIds={openIds}
+          statusById={statusById}
+          startingId={startingId}
+          query={query}
+          onQuery={setQuery}
+          onConnect={connect}
+          onRestart={restart}
+          onEnd={endWorkspace}
+          error={error}
+        />
       )}
     </div>
   )
