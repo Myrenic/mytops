@@ -79,9 +79,13 @@ spec:
               path: /api/health
               port: workplace
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
         # Proxies the Kubernetes API (RBAC-scoped to the chacdn-control
         # ServiceAccount) so the workplace-api can provision workspace pods.
         - name: kubectl-proxy
@@ -91,9 +95,13 @@ spec:
             - name: api
               containerPort: 8001
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
       volumes:
         - name: webui
           configMap:
