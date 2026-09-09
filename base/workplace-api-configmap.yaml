@@ -66,6 +66,10 @@ data:
       return "ws-" + entryId + "-" + slug
     }
 
+    function pvcName(entryId, slug) {
+      return "chacdn-home-" + entryId + "-" + slug
+    }
+
     function depPath(name) {
       return "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
     }
@@ -76,6 +80,10 @@ data:
 
     function irPath(name) {
       return "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name
+    }
+
+    function pvcPath(name) {
+      return "/api/v1/namespaces/" + NAMESPACE + "/persistentvolumeclaims/" + name
     }
 
     function domainForHost(host) {
@@ -90,6 +98,20 @@ data:
     // ── Manifest builders ─────────────────────────────────────────────
     function deploymentManifest(entry, name, slug) {
       const domain = baseDomain()
+      const isPersistent = entry.persistence === "persistent"
+
+      const volumes = [
+        { name: "dshm", emptyDir: { medium: "Memory", sizeLimit: "1Gi" } },
+      ]
+      const volumeMounts = [
+        { name: "dshm", mountPath: "/dev/shm" },
+      ]
+
+      if (isPersistent) {
+        volumes.push({ name: "home", persistentVolumeClaim: { claimName: pvcName(entry.id, slug) } })
+        volumeMounts.push({ name: "home", mountPath: "/config" })
+      }
+
       return {
         apiVersion: "apps/v1",
         kind: "Deployment",
@@ -101,6 +123,8 @@ data:
             "app.kubernetes.io/component": "session",
             "chacdn-owner": slug,
             "chacdn-entry": entry.id,
+            "chacdn-persistence": entry.persistence || "disposable",
+            "chacdn-lifecycle": entry.lifecycle || "ephemeral",
           },
         },
         spec: {
@@ -133,10 +157,34 @@ data:
                     runAsNonRoot: true,
                     seccompProfile: { type: "RuntimeDefault" },
                   },
+                  volumeMounts,
                 },
               ],
+              volumes,
             },
           },
+        },
+      }
+    }
+
+    function pvcManifest(entryId, slug) {
+      return {
+        apiVersion: "v1",
+        kind: "PersistentVolumeClaim",
+        metadata: {
+          name: pvcName(entryId, slug),
+          namespace: NAMESPACE,
+          labels: {
+            "app.kubernetes.io/name": "chacdn",
+            "app.kubernetes.io/component": "home",
+            "chacdn-owner": slug,
+            "chacdn-entry": entryId,
+          },
+        },
+        spec: {
+          accessModes: ["ReadWriteOnce"],
+          resources: { requests: { storage: "5Gi" } },
+          storageClassName: "longhorn",
         },
       }
     }
@@ -232,6 +280,8 @@ data:
                 name: entry?.name ?? entryId,
                 type: entry?.type ?? "app",
                 icon: entry?.icon,
+                persistence: entry?.persistence || "disposable",
+                lifecycle: entry?.lifecycle || "ephemeral",
                 status: ready ? "running" : "starting",
                 url: "https://" + name + ".apps." + baseDomain(),
               }
@@ -253,6 +303,13 @@ data:
           const name = instName(entry.id, slug)
           const domain = baseDomain()
 
+          // Create PVC first if persistent (Deployment waits for it)
+          if (entry.persistence === "persistent") {
+            if (!(await resourceExists(pvcPath(pvcName(entry.id, slug))))) {
+              await kube("POST", "/api/v1/namespaces/" + NAMESPACE + "/persistentvolumeclaims", pvcManifest(entry.id, slug))
+            }
+          }
+
           // Create each resource independently (partial-apply recovery)
           if (!(await resourceExists(depPath(name)))) {
             await kube("POST", "/apis/apps/v1/namespaces/services/deployments", deploymentManifest(entry, name, slug))
@@ -269,6 +326,8 @@ data:
             name: entry.name,
             type: entry.type,
             icon: entry.icon,
+            persistence: entry.persistence || "disposable",
+            lifecycle: entry.lifecycle || "ephemeral",
             status: "starting",
             url: "https://" + name + ".apps." + domain,
           })
@@ -280,6 +339,7 @@ data:
           const entryId = decodeURIComponent(wsMatch[1])
           const slug = slugFor(email())
           const name = instName(entryId, slug)
+          const entry = catalog.apps.find((a) => a.id === entryId)
 
           if (method === "POST") {
             // Rolling restart
@@ -297,6 +357,12 @@ data:
               kube("DELETE", svcPath(name)),
               kube("DELETE", irPath(name)),
             ])
+            // Only delete PVC for disposable entries; persistent ones keep state
+            if (!entry || entry.persistence !== "persistent") {
+              await Promise.allSettled([
+                kube("DELETE", pvcPath(pvcName(entryId, slug))),
+              ])
+            }
             return json(200, { ok: true })
           }
         }

@@ -12,6 +12,8 @@ export interface Workspace {
   name: string
   type: string
   icon?: string
+  persistence?: "disposable" | "persistent"
+  lifecycle?: "ephemeral" | "suspend" | "persistent"
   status: "running" | "starting"
   url: string
 }
