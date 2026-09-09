@@ -1,5 +1,6 @@
-import { Loader2 } from "lucide-react"
+import { Loader2, RotateCw } from "lucide-react"
 import type { Ref } from "react"
+import { Button } from "@/components/ui/button"
 
 export interface OverlayState {
   title: string
@@ -16,6 +17,8 @@ interface SessionViewProps {
   instUrl: string
   frameNonce: number
   overlay: OverlayState | null
+  status?: "running" | "starting" | "stopped" | "offline"
+  onRestart?: () => void
   containerRef?: Ref<HTMLDivElement>
 }
 
@@ -24,8 +27,13 @@ export function SessionView({
   instUrl,
   frameNonce,
   overlay,
+  status,
+  onRestart,
   containerRef,
 }: SessionViewProps) {
+  const isStarting = status === "starting"
+  const isOffline = status === "offline" || status === "stopped"
+
   return (
     <div ref={containerRef} className="relative min-h-0 flex-1 bg-black">
       <iframe
@@ -35,6 +43,7 @@ export function SessionView({
         className="block h-full w-full border-0"
         allow="autoplay; clipboard-read; clipboard-write; display-capture; fullscreen; microphone; pointer-lock"
       />
+      {/* Explicit overlay from parent (launching, restarting, etc.) */}
       {overlay && (
         <div className="absolute inset-0 z-10 grid place-items-center bg-background/95">
           <div className="flex max-w-sm flex-col items-center gap-4 px-6 text-center">
@@ -43,6 +52,39 @@ export function SessionView({
               <p className="text-sm font-medium">{overlay.title}</p>
               <p className="text-xs text-muted-foreground">{overlay.detail}</p>
             </div>
+          </div>
+        </div>
+      )}
+      {/* Health probe: workspace still starting after iframe loaded */}
+      {!overlay && isStarting && (
+        <div className="absolute inset-0 z-10 grid place-items-center bg-background/80">
+          <div className="flex max-w-sm flex-col items-center gap-4 px-6 text-center">
+            <Loader2 className="size-8 animate-spin text-muted-foreground" />
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Reconnecting…</p>
+              <p className="text-xs text-muted-foreground">
+                Waiting for {entry.name} to become ready.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Health probe: workspace went offline */}
+      {!overlay && isOffline && (
+        <div className="absolute inset-0 z-10 grid place-items-center bg-background/90">
+          <div className="flex max-w-sm flex-col items-center gap-4 px-6 text-center">
+            <p className="text-sm font-medium text-destructive">
+              Workspace offline
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {entry.name} has stopped or was terminated.
+            </p>
+            {onRestart && (
+              <Button size="sm" onClick={onRestart}>
+                <RotateCw className="mr-1.5 size-3.5" />
+                Restart
+              </Button>
+            )}
           </div>
         </div>
       )}

@@ -432,6 +432,8 @@ export function App() {
           instUrl={active.url}
           frameNonce={frameNonce}
           overlay={overlay}
+          status={statusById[active.id]}
+          onRestart={() => restart(active)}
           containerRef={frameRef}
         />
       ) : (
