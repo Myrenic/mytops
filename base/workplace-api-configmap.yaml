@@ -30,7 +30,7 @@ data:
     const KUBE_API = process.env.KUBE_API || "http://localhost:8001"
     const CATALOG_PATH = process.env.CATALOG_PATH || "/etc/chacdn/catalog.json"
     const NAMESPACE = "services"
-    const IR_DOMAIN = process.env.IR_DOMAIN || "" // e.g. apps.home.intra
+    const IR_DOMAIN = process.env.IR_DOMAIN || ""
 
     let catalog = { apps: [] }
     try {
@@ -46,7 +46,8 @@ data:
         headers: { "Content-Type": "application/merge-patch+json" },
       }
       if (body) opts.body = JSON.stringify(body)
-      const res = await fetch(`${KUBE_API}${path}`, opts)
+      const url = KUBE_API + path
+      const res = await fetch(url, opts)
       const text = await res.text()
       try {
         return { status: res.status, data: JSON.parse(text) }
@@ -62,19 +63,19 @@ data:
     }
 
     function instName(entryId, slug) {
-      return `ws-${entryId}-${slug}`
+      return "ws-" + entryId + "-" + slug
     }
 
     function depPath(name) {
-      return `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/${name}`
+      return "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
     }
 
     function svcPath(name) {
-      return `/api/v1/namespaces/${NAMESPACE}/services/${name}`
+      return "/api/v1/namespaces/" + NAMESPACE + "/services/" + name
     }
 
     function irPath(name) {
-      return `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${name}`
+      return "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name
     }
 
     function domainForHost(host) {
@@ -150,7 +151,7 @@ data:
           labels: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session" },
         },
         spec: {
-          selector: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session", "chacdn-owner": slugFor(email()), "chacdn-entry": name.replace(/^ws-/, "").replace(new RegExp(`-${slugFor(email())}$`), "") },
+          selector: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session", "chacdn-owner": slugFor(email()), "chacdn-entry": name.replace(/^ws-/, "").replace(new RegExp("-" + slugFor(email()) + "$"), "") },
           ports: [{ name: "http", port: 80, targetPort: 8080 }],
         },
       }
@@ -168,7 +169,7 @@ data:
         spec: {
           entryPoints: ["websecure"],
           routes: [
-            { match: `Host(\`${name}.apps.${domain}\`)`, kind: "Rule", services: [{ name, namespace: NAMESPACE, port: 80 }] },
+            { match: "Host(`" + name + ".apps." + domain + "`)", kind: "Rule", services: [{ name, namespace: NAMESPACE, port: 80 }] },
           ],
         },
       }
@@ -189,7 +190,7 @@ data:
 
     // ── HTTP server ───────────────────────────────────────────────────
     const server = createServer(async (req, res) => {
-      const url = new URL(req.url, `http://${req.headers.host}`)
+      const url = new URL(req.url, "http://" + req.headers.host)
       const method = req.method
 
       const json = (code, data) => {
@@ -216,7 +217,7 @@ data:
         // List workspaces
         if (url.pathname === "/api/workspaces" && method === "GET") {
           const slug = slugFor(email())
-          const { status, data } = await kube("GET", `/apis/apps/v1/namespaces/${NAMESPACE}/deployments?labelSelector=chacdn-owner%3D${slug}`)
+          const { status, data } = await kube("GET", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments?labelSelector=chacdn-owner%3D" + slug)
           if (status !== 200) return json(status, data)
 
           const workspaces = (data.items ?? [])
@@ -232,7 +233,7 @@ data:
                 type: entry?.type ?? "app",
                 icon: entry?.icon,
                 status: ready ? "running" : "starting",
-                url: `https://${name}.apps.${baseDomain()}`,
+                url: "https://" + name + ".apps." + baseDomain(),
               }
             })
 
@@ -260,7 +261,7 @@ data:
             await kube("POST", "/api/v1/namespaces/services/services", serviceManifest(name))
           }
           if (!(await resourceExists(irPath(name)))) {
-            await kube("POST", `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes`, ingressManifest(name, domain))
+            await kube("POST", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes", ingressManifest(name, domain))
           }
 
           return json(200, {
@@ -269,7 +270,7 @@ data:
             type: entry.type,
             icon: entry.icon,
             status: "starting",
-            url: `https://${name}.apps.${domain}`,
+            url: "https://" + name + ".apps." + domain,
           })
         }
 
@@ -318,5 +319,5 @@ data:
 
     const PORT = process.env.PORT || 3001
     server.listen(PORT, () => {
-      console.log(`workplace-api listening on :${PORT}`)
+      console.log("workplace-api listening on :" + PORT)
     })
