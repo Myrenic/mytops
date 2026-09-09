@@ -45,6 +45,8 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
         # Workplace API: validates requests server-side, enforces group ACL,
         # builds manifests, and provisions workspace resources via the
         # kubectl-proxy sidecar.  The browser never touches the K8s API.
