@@ -7,4 +7,5 @@ resources:
   - ./nginx.yaml
   - ./api-catalog.yaml
   - ./workplace-api-configmap.yaml
+  - ./idle-culler.yaml
   - ./chacdn-webui.configmap.json

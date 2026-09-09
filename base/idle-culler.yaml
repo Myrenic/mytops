@@ -1,0 +1,80 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: chacdn-idle-culler
+  namespace: services
+  labels:
+    app.kubernetes.io/name: chacdn
+    app.kubernetes.io/component: idle-culler
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: chacdn
+            app.kubernetes.io/component: idle-culler
+        spec:
+          serviceAccountName: chacdn-control
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: cull
+              image: docker.io/library/alpine:3.20
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  MAX_MINUTES=${MAX_LIFETIME_MINUTES:-480}
+                  echo "Culling workspaces older than ${MAX_MINUTES}m"
+
+                  # List all chacdn session deployments
+                  DEPLOYMENTS=$(kubectl get deploy -n services \
+                    -l app.kubernetes.io/component=session \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\t"}{.metadata.labels.chacdn-owner}{"\n"}{end}')
+
+                  NOW=$(date +%s)
+                  CULLED=0
+
+                  while IFS=$'\t' read -r name created owner; do
+                    [ -z "$name" ] && continue
+                    CREATED_TS=$(date -d "$created" +%s 2>/dev/null || echo 0)
+                    AGE_MINUTES=$(( (NOW - CREATED_TS) / 60 ))
+
+                    if [ "$AGE_MINUTES" -ge "$MAX_MINUTES" ]; then
+                      echo "Culling ${name} (age: ${AGE_MINUTES}m, owner: ${owner})"
+                      # Best-effort cleanup: Deployment + Service + IngressRoute
+                      kubectl delete deploy "$name" -n services --ignore-not-found 2>&1 || true
+                      kubectl delete svc "$name" -n services --ignore-not-found 2>&1 || true
+                      kubectl delete ingressroute "$name" -n network --ignore-not-found 2>&1 || true
+                      CULLED=$((CULLED + 1))
+                    fi
+                  done <<< "$DEPLOYMENTS"
+
+                  echo "Done. Culled ${CULLED} workspace(s)."
+              env:
+                - name: MAX_LIFETIME_MINUTES
+                  value: "480"
+              resources:
+                requests:
+                  cpu: 5m
+                  memory: 16Mi
+                limits:
+                  memory: 64Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                readOnlyRootFilesystem: true
