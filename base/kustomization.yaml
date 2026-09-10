@@ -8,4 +8,5 @@ resources:
   - ./api-catalog.yaml
   - ./chacdn-workplace-api.configmap.json
   - ./idle-culler.yaml
+  - ./idle-culler-script.yaml
   - ./chacdn-webui.configmap.json
