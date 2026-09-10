@@ -12,7 +12,7 @@ export interface CatalogEntry {
   type: EntryType
   icon?: string
   /** selkies image to launch a per-user instance from */
-  image: string
+  image?: string
   env?: { name: string; value: string }[]
   /** Keycloak groups allowed to see/launch this entry; empty = everyone */
   groups?: string[]
@@ -24,6 +24,8 @@ export interface CatalogEntry {
   lifecycle?: Lifecycle
   /** Per-entry resource overrides (cpu, memory). Merged into the manifest. */
   resources?: { cpu?: string; memory?: string }
+  /** VM-only: PVC size for the root disk. */
+  storage?: string
 }
 
 export interface Me {

@@ -11,6 +11,7 @@ export interface Workspace {
   id: string
   name: string
   type: string
+  runtime?: "container" | "vm-linux" | "vm-windows"
   icon?: string
   persistence?: "disposable" | "persistent"
   lifecycle?: "ephemeral" | "suspend" | "persistent"

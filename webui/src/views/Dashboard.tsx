@@ -24,6 +24,12 @@ const FALLBACK_ICON: Record<string, string> = { desktop: "🖥️", app: "🧩" 
 
 const TYPE_LABEL: Record<string, string> = { desktop: "Desktop", app: "App" }
 
+const RUNTIME_LABEL: Record<string, string> = {
+  container: "Container",
+  "vm-linux": "Linux VM",
+  "vm-windows": "Windows VM",
+}
+
 // Deterministic pastel gradient per entry id so each workspace tile has a
 // stable, distinct look without shipping artwork.
 function tileGradient(id: string): string {
@@ -105,7 +111,9 @@ function Tile({ entry, status, isOpen, onConnect, onRestart, onEnd }: TileProps)
           variant="secondary"
           className="absolute top-2 right-2 bg-black/20 text-white backdrop-blur-sm"
         >
-          {TYPE_LABEL[entry.type]}
+          {entry.runtime && RUNTIME_LABEL[entry.runtime]
+            ? RUNTIME_LABEL[entry.runtime]
+            : TYPE_LABEL[entry.type]}
         </Badge>
       </div>
       <CardHeader className="pb-2">

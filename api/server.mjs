@@ -3,7 +3,9 @@ import { createServer } from "node:http"
 const PORT = Number(process.env.PORT) || 3001
 const KUBE_API = process.env.KUBE_API || "http://localhost:8001"
 const NAMESPACE = process.env.WORKSPACE_NAMESPACE || "services"
+const VM_NAMESPACE = process.env.VM_NAMESPACE || "kubevirt"
 const DOMAIN = process.env.BASE_DOMAIN || ""
+const GUACAMOLE_PATH = "/guacamole/"
 
 // ── Catalog ──────────────────────────────────────────────────────────
 // Embedded from catalog.json at build time; the server is the single
@@ -41,7 +43,7 @@ function slugFor(email) {
 }
 
 function instName(entryId, slug) {
-  return `ws-${entryId}-${slug}`
+  return "ws-" + entryId + "-" + slug
 }
 
 // Derive base domain from a Host header (strip first component).
@@ -57,7 +59,7 @@ async function kubeFetch(method, path, body, identityHeaders) {
   const headers = { ...identityHeaders, "Content-Type": "application/json" }
   const opts = { method, headers }
   if (body) opts.body = JSON.stringify(body)
-  const res = await fetch(`${KUBE_API}${path}`, opts)
+  const res = await fetch(KUBE_API + path, opts)
   const text = await res.text()
   try { return JSON.parse(text) } catch { return text }
 }
@@ -134,7 +136,7 @@ function buildIngressRoute(name, domain) {
       entryPoints: ["websecure"],
       routes: [
         {
-          match: `Host(\`${name}.${domain}\`)`,
+          match: "Host(`" + name + "." + domain + "`)",
           kind: "Rule",
           services: [{ name, namespace: NAMESPACE, port: 3000 }],
         },
@@ -142,6 +144,142 @@ function buildIngressRoute(name, domain) {
       tls: { secretName: "domain-0-prod-tls" },
     },
   }
+}
+
+// ── VM helpers ───────────────────────────────────────────────────────
+
+// Cloud-init user-data for Ubuntu + xfce4 + xrdp.  No template literals
+// to avoid Flux postBuild envsubst conflicts in the ConfigMap.
+function cloudInitUserData() {
+  return [
+    "#cloud-config",
+    "package_update: true",
+    "packages:",
+    "  - xfce4",
+    "  - xrdp",
+    "  - xfce4-terminal",
+    "  - dbus-x11",
+    "users:",
+    "  - default",
+    "  - name: user",
+    "    plain_text_passwd: user",
+    "    lock_passwd: false",
+    "    shell: /bin/bash",
+    "    groups: sudo, ssl-cert",
+    "runcmd:",
+    "  - echo 'xfce4-session' > /home/user/.xsession",
+    "  - chown user:user /home/user/.xsession",
+    "  - systemctl enable xrdp",
+    "  - systemctl enable xrdp-sesman",
+  ].join("\n")
+}
+
+// VM image URL — pinned Ubuntu 22.04 cloud image.
+const VM_IMAGE_URL =
+  "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+
+function buildVirtualMachine(entry, name, owner) {
+  const cpu = parseInt(entry.resources?.cpu) || 2
+  const mem = entry.resources?.memory || "2Gi"
+  const storage = entry.storage || "10Gi"
+  return {
+    apiVersion: "kubevirt.io/v1",
+    kind: "VirtualMachine",
+    metadata: {
+      name: name,
+      namespace: VM_NAMESPACE,
+      labels: {
+        "app.kubernetes.io/name": name,
+        "chacdn-owner": owner,
+        "chacdn-runtime": entry.runtime || "vm-linux",
+        "chacdn-persistence": entry.persistence || "disposable",
+        "chacdn-lifecycle": entry.lifecycle || "ephemeral",
+      },
+    },
+    spec: {
+      runStrategy: "Always",
+      template: {
+        metadata: {
+          labels: { "app.kubernetes.io/name": name },
+        },
+        spec: {
+          domain: {
+            cpu: { cores: cpu },
+            memory: { guest: mem },
+            devices: {
+              disks: [
+                { name: "rootdisk", disk: { bus: "virtio" } },
+                { name: "cloudinit", disk: { bus: "virtio" } },
+              ],
+              interfaces: [
+                { name: "default", masquerade: {} },
+              ],
+            },
+            machine: { type: "q35" },
+          },
+          networks: [
+            { name: "default", pod: {} },
+          ],
+          terminationGracePeriodSeconds: 0,
+          volumes: [
+            {
+              name: "rootdisk",
+              persistentVolumeClaim: { claimName: name },
+            },
+            {
+              name: "cloudinit",
+              cloudInitNoCloud: {
+                userData: cloudInitUserData(),
+              },
+            },
+          ],
+        },
+      },
+      dataVolumeTemplates: [
+        {
+          metadata: { name: name },
+          spec: {
+            source: {
+              http: { url: VM_IMAGE_URL },
+            },
+            pvc: {
+              accessModes: ["ReadWriteOnce"],
+              storageClassName: "longhorn",
+              resources: {
+                requests: { storage: storage },
+              },
+            },
+          },
+        },
+      ],
+    },
+  }
+}
+
+function buildVmService(name) {
+  return {
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: {
+      name: name + "-svc",
+      namespace: VM_NAMESPACE,
+      labels: { "app.kubernetes.io/name": name },
+    },
+    spec: {
+      selector: { "app.kubernetes.io/name": name },
+      ports: [
+        { name: "rdp", port: 3389, targetPort: 3389 },
+      ],
+    },
+  }
+}
+
+function isVmRuntime(runtime) {
+  return runtime && runtime.startsWith("vm-")
+}
+
+function guacamoleUrl(domain) {
+  return "https://rdp." + domain + GUACAMOLE_PATH
 }
 
 // ── Route handlers ───────────────────────────────────────────────────
@@ -159,18 +297,20 @@ function handleCatalog(_req, res) {
 // GET /api/workspaces — list running workspaces for the caller.
 async function handleListWorkspaces(req, res, identity) {
   const slug = slugFor(identity.email)
-  const list = await kubeFetch(
+  const domain = DOMAIN || baseDomain(req.headers.host ?? "")
+
+  // ── Container workspaces (Deployments in services ns) ────────────
+  const depList = await kubeFetch(
     "GET",
-    `/apis/apps/v1/namespaces/${NAMESPACE}/deployments?labelSelector=chacdn-owner%3D${slug}`,
+    "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments?labelSelector=chacdn-owner%3D" + slug,
     null,
     req.headers,
   )
-  const items = list.items ?? []
-  const workspaces = items
+  const depItems = depList.items ?? []
+  const containerWs = depItems
     .filter((d) => d.metadata?.name?.startsWith("ws-"))
     .map((d) => {
       const name = d.metadata.name
-      // Extract entryId from "ws-{entryId}-{slug}"
       const entryId = name.slice(3, name.length - slug.length - 1)
       const ready = (d.status?.readyReplicas ?? 0) >= 1
       const entry = catalog.find((e) => e.id === entryId)
@@ -178,12 +318,44 @@ async function handleListWorkspaces(req, res, identity) {
         id: entryId,
         name: entry?.name ?? entryId,
         type: entry?.type ?? "desktop",
+        runtime: "container",
         icon: entry?.icon,
         status: ready ? "running" : "starting",
-        url: `https://${name}.${DOMAIN || baseDomain(req.headers.host ?? "")}`,
+        url: "https://" + name + "." + domain,
       }
     })
-  json(res, 200, workspaces)
+
+  // ── VM workspaces (VirtualMachines in kubevirt ns) ───────────────
+  let vmItems = []
+  try {
+    const vmList = await kubeFetch(
+      "GET",
+      "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines?labelSelector=chacdn-owner%3D" + slug,
+      null,
+      req.headers,
+    )
+    vmItems = vmList.items ?? []
+  } catch { /* KubeVirt not installed yet */ }
+
+  const vmWs = vmItems
+    .filter((vm) => vm.metadata?.labels?.["chacdn-runtime"]?.startsWith("vm-"))
+    .map((vm) => {
+      const name = vm.metadata.name
+      const entryId = name.slice(3, name.length - slug.length - 1)
+      const ready = vm.status?.ready ?? false
+      const entry = catalog.find((e) => e.id === entryId)
+      return {
+        id: entryId,
+        name: entry?.name ?? entryId,
+        type: entry?.type ?? "desktop",
+        runtime: entry?.runtime ?? "vm-linux",
+        icon: entry?.icon,
+        status: ready ? "running" : "starting",
+        url: guacamoleUrl(domain),
+      }
+    })
+
+  json(res, 200, containerWs.concat(vmWs))
 }
 
 // POST /api/workspaces { catalogId } — create a workspace.
@@ -206,82 +378,94 @@ async function handleCreateWorkspace(req, res, identity) {
   const name = instName(entry.id, slug)
   const domain = DOMAIN || baseDomain(req.headers.host ?? "")
 
-  // Create each resource independently: an orphaned Deployment from an
-  // earlier partial connect must not skip Service/IngressRoute creation.
-  const depPath = `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/${name}`
+  if (isVmRuntime(entry.runtime)) {
+    return handleCreateVmWorkspace(req, res, entry, name, slug, domain)
+  }
+  return handleCreateContainerWorkspace(req, res, entry, name, slug, domain)
+}
+
+// ── Container workspace creation ─────────────────────────────────────
+async function handleCreateContainerWorkspace(req, res, entry, name, slug, domain) {
+  const depPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
   const existing = await kubeFetch("GET", depPath, null, req.headers)
   if (existing.kind !== "Status") {
-    // Already exists — return the URL so the client can connect.
     return json(res, 200, {
-      id: entry.id,
-      name,
-      status: "running",
-      url: `https://${name}.${domain}`,
+      id: entry.id, name, status: "running",
+      url: "https://" + name + "." + domain,
     })
   }
 
-  // Deploy
-  await kubeFetch(
-    "POST",
-    `/apis/apps/v1/namespaces/${NAMESPACE}/deployments`,
-    buildDeployment(entry, name, slug),
-    req.headers,
-  )
+  await kubeFetch("POST", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments",
+    buildDeployment(entry, name, slug), req.headers)
 
-  // Service
-  const svcExists = await kubeFetch(
-    "GET",
-    `/api/v1/namespaces/${NAMESPACE}/services/${name}`,
-    null,
-    req.headers,
-  )
+  const svcPath = "/api/v1/namespaces/" + NAMESPACE + "/services/" + name
+  const svcExists = await kubeFetch("GET", svcPath, null, req.headers)
   if (svcExists.kind === "Status") {
-    await kubeFetch(
-      "POST",
-      `/api/v1/namespaces/${NAMESPACE}/services`,
-      buildService(name),
-      req.headers,
-    )
+    await kubeFetch("POST", "/api/v1/namespaces/" + NAMESPACE + "/services",
+      buildService(name), req.headers)
   }
 
-  // IngressRoute
-  const irExists = await kubeFetch(
-    "GET",
-    `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${name}`,
-    null,
-    req.headers,
-  )
+  const irExists = await kubeFetch("GET",
+    "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name,
+    null, req.headers)
   if (irExists.kind === "Status") {
-    await kubeFetch(
-      "POST",
-      `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes`,
-      buildIngressRoute(name, domain),
-      req.headers,
-    )
+    await kubeFetch("POST", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
+      buildIngressRoute(name, domain), req.headers)
   }
 
-  // Wait for the Deployment to become ready (up to 3 minutes).
   const deadline = Date.now() + 180_000
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 3000))
     const dep = await kubeFetch("GET", depPath, null, req.headers)
     if ((dep.status?.readyReplicas ?? 0) >= 1) {
       return json(res, 200, {
-        id: entry.id,
-        name,
-        status: "running",
-        url: `https://${name}.${domain}`,
+        id: entry.id, name, status: "running",
+        url: "https://" + name + "." + domain,
       })
     }
   }
 
-  // Timed out — still return 200 so the client can show a spinner; the pod
-  // is probably still pulling the image.
   json(res, 200, {
-    id: entry.id,
-    name,
-    status: "starting",
-    url: `https://${name}.${domain}`,
+    id: entry.id, name, status: "starting",
+    url: "https://" + name + "." + domain,
+  })
+}
+
+// ── VM workspace creation ────────────────────────────────────────────
+async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
+  const vmPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name
+
+  const existing = await kubeFetch("GET", vmPath, null, req.headers)
+  if (existing.kind !== "Status") {
+    return json(res, 200, {
+      id: entry.id, name, status: "running", url: guacamoleUrl(domain),
+    })
+  }
+
+  await kubeFetch("POST", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines",
+    buildVirtualMachine(entry, name, slug), req.headers)
+
+  const svcPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc"
+  const svcExists = await kubeFetch("GET", svcPath, null, req.headers)
+  if (svcExists.kind === "Status") {
+    await kubeFetch("POST", "/api/v1/namespaces/" + VM_NAMESPACE + "/services",
+      buildVmService(name), req.headers)
+  }
+
+  // Wait for VM readiness (up to 5 min — image import + cloud-init).
+  const deadline = Date.now() + 300_000
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5000))
+    const vm = await kubeFetch("GET", vmPath, null, req.headers)
+    if (vm.status?.ready) {
+      return json(res, 200, {
+        id: entry.id, name, status: "running", url: guacamoleUrl(domain),
+      })
+    }
+  }
+
+  json(res, 200, {
+    id: entry.id, name, status: "starting", url: guacamoleUrl(domain),
   })
 }
 
@@ -290,10 +474,14 @@ async function handleDeleteWorkspace(req, res, identity, entryId) {
   const slug = slugFor(identity.email)
   const name = instName(entryId, slug)
 
-  // Best-effort delete all three resources.
-  await kubeFetch("DELETE", `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/${name}`, null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", `/api/v1/namespaces/${NAMESPACE}/services/${name}`, null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", `/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/${name}`, null, req.headers).catch(() => {})
+  // Best-effort delete container resources.
+  await kubeFetch("DELETE", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name, null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/api/v1/namespaces/" + NAMESPACE + "/services/" + name, null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name, null, req.headers).catch(() => {})
+
+  // Best-effort delete VM resources.
+  await kubeFetch("DELETE", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name, null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc", null, req.headers).catch(() => {})
 
   json(res, 200, { ok: true })
 }
@@ -302,7 +490,7 @@ async function handleDeleteWorkspace(req, res, identity, entryId) {
 async function handleRestartWorkspace(req, res, identity, entryId) {
   const slug = slugFor(identity.email)
   const name = instName(entryId, slug)
-  const depPath = `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/${name}`
+  const depPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
 
   const patch = {
     spec: {
@@ -340,7 +528,7 @@ const server = createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type")
   if (req.method === "OPTIONS") { res.writeHead(204); return res.end() }
 
-  const url = new URL(req.url ?? "/", `http://${req.headers.host}`)
+  const url = new URL(req.url ?? "/", "http://" + (req.headers.host ?? "localhost"))
   const path = url.pathname
 
   // Extract oauth2-proxy identity headers.
@@ -371,5 +559,5 @@ const server = createServer(async (req, res) => {
 })
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`workplace-api listening on :${PORT}`)
+  console.log("workplace-api listening on :" + PORT)
 })
