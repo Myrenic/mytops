@@ -18,7 +18,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { type CatalogEntry, type SessionStatus } from "@/lib/k8s"
+import { type CatalogEntry, type SessionStatus } from "@/lib/workplace"
 
 const FALLBACK_ICON: Record<string, string> = { desktop: "🖥️", app: "🧩" }
 

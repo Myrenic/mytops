@@ -76,8 +76,10 @@ function buildDeployment(entry, name, owner) {
       name,
       namespace: NAMESPACE,
       labels: {
-        app: name,
+        "app.kubernetes.io/name": "chacdn",
+        "app.kubernetes.io/component": "session",
         "chacdn-owner": owner,
+        "chacdn-entry": entry.id,
         "chacdn-runtime": entry.runtime ?? "container",
         "chacdn-persistence": entry.persistence ?? "disposable",
         "chacdn-lifecycle": entry.lifecycle ?? "ephemeral",
@@ -85,9 +87,9 @@ function buildDeployment(entry, name, owner) {
     },
     spec: {
       replicas: 1,
-      selector: { matchLabels: { app: name } },
+      selector: { matchLabels: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session", "chacdn-owner": owner, "chacdn-entry": entry.id } },
       template: {
-        metadata: { labels: { app: name } },
+        metadata: { labels: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session", "chacdn-owner": owner, "chacdn-entry": entry.id } },
         spec: {
           containers: [
             {
@@ -115,13 +117,17 @@ function buildDeployment(entry, name, owner) {
   }
 }
 
-function buildService(name) {
+function buildService(name, owner, entryId) {
   return {
     apiVersion: "v1",
     kind: "Service",
-    metadata: { name, namespace: NAMESPACE },
+    metadata: {
+      name,
+      namespace: NAMESPACE,
+      labels: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session" },
+    },
     spec: {
-      selector: { app: name },
+      selector: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session", "chacdn-owner": owner, "chacdn-entry": entryId },
       ports: [{ name: "http", port: 3000, targetPort: "http" }],
     },
   }
@@ -402,7 +408,7 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
   const svcExists = await kubeFetch("GET", svcPath, null, req.headers)
   if (svcExists.kind === "Status") {
     await kubeFetch("POST", "/api/v1/namespaces/" + NAMESPACE + "/services",
-      buildService(name), req.headers)
+      buildService(name, slug, entry.id), req.headers)
   }
 
   const irExists = await kubeFetch("GET",

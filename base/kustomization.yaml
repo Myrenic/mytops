@@ -6,6 +6,6 @@ resources:
   - ./control.yaml
   - ./nginx.yaml
   - ./api-catalog.yaml
-  - ./workplace-api-configmap.yaml
+  - ./chacdn-workplace-api.configmap.json
   - ./idle-culler.yaml
   - ./chacdn-webui.configmap.json

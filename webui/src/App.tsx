@@ -13,21 +13,15 @@ import { Button } from "@/components/ui/button"
 import { useTheme } from "@/components/theme-provider"
 import {
   baseDomain,
-  depPath,
-  instName,
-  readJson,
-  slugFor,
-  type CatalogEntry,
-  type Me,
-  type SessionStatus,
-} from "@/lib/k8s"
-import {
   createWorkspace,
   endWorkspace as apiEndWorkspace,
   fetchCatalog,
   fetchMe,
   listWorkspaces,
   restartWorkspace as apiRestartWorkspace,
+  type CatalogEntry,
+  type Me,
+  type SessionStatus,
   type Workspace,
 } from "@/lib/workplace"
 import { Dashboard } from "@/views/Dashboard"
@@ -55,7 +49,6 @@ export function App() {
   const frameRef = useRef<HTMLDivElement>(null)
   const { theme, setTheme } = useTheme()
 
-  const slug = useMemo(() => (me ? slugFor(me.email) : ""), [me])
   const domain = useMemo(() => baseDomain(), [])
   const myGroups = useMemo(
     () =>
@@ -157,40 +150,48 @@ export function App() {
 
   // Poll the live status of open workspaces so tiles/tabs reflect reality
   // (e.g. a pod that died or finished restarting) without a page reload.
-  // Uses the direct K8s API (read-only) for efficiency.
+  // Uses the workplace API (server-side source of truth).
   useEffect(() => {
-    if (!slug || workspaces.length === 0) return
+    if (!me || workspaces.length === 0) return
     const poll = async () => {
-      for (const w of workspaces) {
-        try {
-          const dep = await readJson(depPath(instName(w.id, slug)))
-          if (dep.kind === "Status") {
-            // 404: terminated externally -> drop the tab like a manual close
-            setWorkspaces((prev) => prev.filter((x) => x.id !== w.id))
-            setStatusById((prev) => {
-              const c = { ...prev }
-              delete c[w.id]
-              return c
-            })
-            setActiveId((prev) =>
-              prev === w.id ? (workspaces.filter((x) => x.id !== w.id).at(-1)?.id ?? null) : prev
-            )
-            continue
+      try {
+        const ws = await listWorkspaces()
+        const wsById = new Map(ws.map((w) => [w.id, w]))
+        // Update status for existing workspaces
+        setStatusById((prev) => {
+          const next = { ...prev }
+          for (const w of workspaces) {
+            const live = wsById.get(w.id)
+            if (live) {
+              next[w.id] = live.status
+            } else {
+              // Workspace disappeared (terminated externally)
+              delete next[w.id]
+            }
           }
-          const ready = (dep.status?.readyReplicas ?? 0) >= 1
-          setStatusById((prev) => ({
-            ...prev,
-            [w.id]: ready ? "running" : "starting",
-          }))
-        } catch {
-          // transient API error; leave status as-is
-        }
+          return next
+        })
+        // Drop workspaces that no longer exist
+        setWorkspaces((prev) => {
+          const alive = prev.filter((w) => wsById.has(w.id))
+          if (alive.length < prev.length) {
+            // Clean up active tab if it was the one that disappeared
+            setActiveId((prevActive) =>
+              prevActive && !wsById.has(prevActive)
+                ? (alive.at(-1)?.id ?? null)
+                : prevActive
+            )
+          }
+          return alive
+        })
+      } catch {
+        // transient API error; leave status as-is
       }
     }
     poll()
     const t = setInterval(poll, 15000)
     return () => clearInterval(t)
-  }, [slug, workspaces])
+  }, [me, workspaces])
 
   const select = (id: string | null) => {
     setOverlay(null)
