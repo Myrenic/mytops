@@ -197,7 +197,9 @@ const SELKIES_X_UNIT = [
   "After=network.target",
   "[Service]",
   "User=user",
-  "ExecStart=/bin/sh -c 'Xvfb :0 -screen 0 1920x1080x24 -ac & sleep 2; exec startxfce4'",
+  // startxfce4 wants xinit (which we don't install) — run the session
+  // manager on our own Xvfb instead.
+  "ExecStart=/bin/sh -c \"Xvfb :0 -screen 0 1920x1080x24 -ac & sleep 2; export DISPLAY=:0; exec dbus-run-session -- /usr/bin/xfce4-session\"",
   "Restart=always",
   "RestartSec=3",
   "[Install]",
