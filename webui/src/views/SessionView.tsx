@@ -1,4 +1,4 @@
-import { Loader2, RotateCw } from "lucide-react"
+import { ExternalLink, Loader2, RotateCw } from "lucide-react"
 import type { Ref } from "react"
 import { Button } from "@/components/ui/button"
 
@@ -55,6 +55,17 @@ export function SessionView({
           </div>
         </div>
       )}
+      {/* Sanity escape hatch: iframe-embedded Keycloak redirects can be
+          blocked by frame policies — open the workspace top-level instead. */}
+      <a
+        href={instUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="absolute right-3 top-3 z-20 inline-flex size-8 items-center justify-center rounded-md bg-background/80 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        title="Open in new tab"
+      >
+        <ExternalLink className="size-4" />
+      </a>
       {/* Health probe: workspace still starting after iframe loaded */}
       {!overlay && isStarting && (
         <div className="absolute inset-0 z-10 grid place-items-center bg-background/80">
