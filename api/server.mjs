@@ -172,49 +172,74 @@ function buildIngressRoute(name, domain, opts) {
 // Shell variables inside the generated cloud-init text must be escaped with
 // a leading extra dollar sign so the Flux postBuild substitution leaves
 // shell-expansion constructs intact for the guest.
-// TURN credentials for the streamer (chacdn-turn Secret, deployed with the
-// coturn manifest). Literal values are injected when the user-data is built
-// at create time — no shell vars survive into the generated cloud-init.
-const TURN_HOST = process.env.TURN_HOST || ""
-const TURN_PORT = process.env.TURN_PORT || "3478"
-const TURN_PROTOCOL = process.env.TURN_PROTOCOL || "udp"
-const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || ""
-
-const SELKIES_UNIT = [
+// KasmVNC desktop stack for VM workspaces — mirrors linuxserver's
+// docker-baseimage-kasmvnc: Xvnc with basic auth disabled and CORS modules
+// (their s6 glue), plain-http websocket for Traefik TLS termination, and an
+// xfce session over dbus-run-session. Same settings the webtop containers
+// use, so the browser-side UI behaves identically.
+const KASMVNC_XUNIT = [
   "[Unit]",
-  "Description=Selkies WebRTC Desktop Stream",
-  "Requires=selkies-x.service",
-  "After=selkies-x.service",
+  "Description=KasmVNC X server on :1",
+  "After=network.target",
   "[Service]",
   "User=user",
-  "Environment=DISPLAY=:0",
-  "Environment=PIPEWIRE_LATENCY=128/48000",
-  "Environment=XDG_RUNTIME_DIR=/tmp",
-  // enable_basic_auth=false: authentication is oauth2-proxy (Keycloak) at the
-  // ingress; avoid the second basic-auth popup.
-  "ExecStart=/opt/selkies-gstreamer/bin/selkies-gstreamer-run --addr=0.0.0.0 --port=8080 --enable_https=false --encoder=x264enc --enable_resize=false --enable_basic_auth=false"
-    + (TURN_HOST && TURN_SHARED_SECRET
-      ? " --turn_host=" + TURN_HOST + " --turn_port=" + TURN_PORT + " --turn_protocol=" + TURN_PROTOCOL + " --turn_tls=false --turn_shared_secret=" + TURN_SHARED_SECRET
-      : ""),
+  "Environment=HOME=/home/user",
+  "ExecStart=/usr/bin/Xkasmvnc :1"
+    + " -disableBasicAuth"
+    + " -SecurityTypes None"
+    + " -AlwaysShared"
+    + " -PublicIP 127.0.0.1"
+    + " -drinode /dev/dri/renderD128"
+    + " -sslOnly 0"
+    + " -websocketPort 8080"
+    + " -interface 0.0.0.0"
+    + " -http-header Cross-Origin-Embedder-Policy=require-corp"
+    + " -http-header Cross-Origin-Opener-Policy=same-origin"
+    + " -geometry 1920x1080"
+    + " -Log *:stdout:10",
   "Restart=always",
+  "RestartSec=3",
+  "[Install]",
+  "WantedBy=multi-user.target",
+].join("\n")
+
+const KASMVNC_SESSION_UNIT = [
+  "[Unit]",
+  "Description=KasmVNC XFCE desktop session",
+  "Requires=kasmvnc-x.service",
+  "After=kasmvnc-x.service",
+  "[Service]",
+  "User=user",
+  "Environment=DISPLAY=:1",
+  "Environment=HOME=/home/user",
+  "ExecStartPre=/usr/bin/sleep 3",
+  "ExecStart=/usr/bin/dbus-run-session -- /usr/bin/xfce4-session",
+  "Restart=on-failure",
   "RestartSec=5",
   "[Install]",
   "WantedBy=multi-user.target",
 ].join("\n")
 
-const SELKIES_X_UNIT = [
-  "[Unit]",
-  "Description=Xvfb XFCE desktop on :0",
-  "After=network.target",
-  "[Service]",
-  "User=user",
-  // startxfce4 wants xinit (which we don't install) — run the session
-  // manager on our own Xvfb instead.
-  "ExecStart=/bin/sh -c \"Xvfb :0 -screen 0 1920x1080x24 -ac & sleep 2; export DISPLAY=:0; exec dbus-run-session -- /usr/bin/xfce4-session\"",
-  "Restart=always",
-  "RestartSec=3",
-  "[Install]",
-  "WantedBy=multi-user.target",
+const KASMVNC_YAML = [
+  "# LSIO-equivalent: no TLS (Traefik terminates it), no in-stack auth,",
+  "# udp path pinned off (no UDP service exposure).",
+  "network:",
+  "  protocol: http",
+  "  interface: 0.0.0.0",
+  "  websocket_port: 8080",
+  "  udp:",
+  "    public_ip: 127.0.0.1",
+  "  ssl:",
+  "    require_ssl: false",
+  "server:",
+  "  http:",
+  "    headers:",
+  "      - Cross-Origin-Embedder-Policy=require-corp",
+  "      - Cross-Origin-Opener-Policy=same-origin",
+  "  auto_shutdown:",
+  "    no_user_session_timeout: never",
+  "    active_user_session_timeout: never",
+  "    inactive_user_session_timeout: never",
 ].join("\n")
 
 function cloudInitUserData() {
@@ -227,16 +252,25 @@ function cloudInitUserData() {
     "    lock_passwd: false",
     "    shell: /bin/bash",
     "    groups: sudo, ssl-cert",
-    // write_files: heredocs inside runcmd break, so unit files land from here.
+    // write_files: heredocs inside runcmd break, so files land from here.
     "write_files:",
-    "  - path: /etc/systemd/system/selkies-x.service",
+    "  - path: /etc/systemd/system/kasmvnc-x.service",
     "    permissions: '0644'",
     "    content: |",
-    "      " + SELKIES_X_UNIT.split("\n").join("\n      "),
-    "  - path: /etc/systemd/system/selkies.service",
-    "    permissions: '0640'",
+    "      " + KASMVNC_XUNIT.split("\n").join("\n      "),
+    "  - path: /etc/systemd/system/kasmvnc-session.service",
+    "    permissions: '0644'",
     "    content: |",
-    "      " + SELKIES_UNIT.split("\n").join("\n      "),
+    "      " + KASMVNC_SESSION_UNIT.split("\n").join("\n      "),
+    "  - path: /etc/kasmvnc/kasmvnc.yaml",
+    "    permissions: '0644'",
+    "    content: |",
+    "      " + KASMVNC_YAML.split("\n").join("\n      "),
+    "  - path: /home/user/.vnc/xstartup",
+    "    permissions: '0755'",
+    "    content: |",
+    "      #!/bin/sh",
+    "      exec dbus-run-session -- /usr/bin/xfce4-session",
     // Not the packages: block — it does not retry and one transient mirror
     // hiccup killed the entire first boot (verified). Retry the install.
     "runcmd:",
@@ -246,25 +280,23 @@ function cloudInitUserData() {
     "      sleep 10",
     "    done",
     "    for i in 1 2 3; do",
-    "      apt-get install -y -o Acquire::Retries=5 --no-install-recommends xfce4 xfce4-terminal dbus-x11 pulseaudio python3 python3-pip python3-dev jq tar gzip ca-certificates curl build-essential libgcrypt20 libgirepository-1.0-1 glib-networking alsa-utils libpulse0 libopus0 libvpx-dev x264 wmctrl xsel xdotool wayland-protocols libwayland-dev libwayland-egl1 x11-utils x11-xkb-utils x11-xserver-utils xserver-xorg-core xvfb libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 libxv1 libxtst6 libxext6 >/var/log/chacdn-packages.log 2>&1 && break",
+    "      apt-get install -y -o Acquire::Retries=5 --no-install-recommends xfce4 xfce4-terminal dbus-x11 libgl1 libgbm1 ca-certificates curl jq procps libpulse0 pulseaudio >/var/log/chacdn-packages.log 2>&1 && break",
     "      sleep 30",
     "    done",
-    "  - echo 'xfce4-session' > /home/user/.xsession",
-    "  - chown user:user /home/user/.xsession",
-    // Selkies portable runtime: self-contained gstreamer with WebRTC support
-    // (asset ~200MB; retry generously).
+    // KasmVNC from kasmtech releases: the exact engine the LSIO webtops embed.
     "  - |",
     "    for i in 1 2 3 4 5; do",
-    "      curl -fsSL 'https://github.com/selkies-project/selkies-gstreamer/releases/download/v1.6.2/selkies-gstreamer-portable-v1.6.2_amd64.tar.gz' -o /opt/selkies.tar.gz && break",
+    "      curl -fsSL 'https://github.com/kasmtech/KasmVNC/releases/download/v1.5.0/kasmvncserver_jammy_1.5.0_amd64.deb' -o /tmp/kasmvncserver.deb && break",
     "      sleep 15",
     "    done",
-    "    tar -xzf /opt/selkies.tar.gz -C /opt",
-    "    chown -R user:user /opt/selkies-gstreamer",
-    // Streamer: own service is written by write_files. Basic auth is a second
-    // gate behind oauth2-proxy; password is the selkies-documented default.
+    "    apt-get install -y -o Acquire::Retries=5 /tmp/kasmvncserver.deb >/var/log/chacdn-kasmvnc.log 2>&1 || apt-get install -f -y >/var/log/chacdn-kasmvnc.log 2>&1",
+    "  - chown -R user:user /home/user/.vnc",
     "  - systemctl daemon-reload",
-    "  - systemctl enable selkies-x selkies",
-    "  - systemctl start selkies-x selkies",
+    "  - systemctl enable kasmvnc-x kasmvnc-session",
+    "  - systemctl start kasmvnc-x kasmvnc-session",
+    // Streamer: own service is written by write_files. The last real gate is
+    // oauth2-proxy (Keycloak) at the ingress.
+    "  - systemctl disable --now selkies selkies-x 2>/dev/null || true",
   ].join("\n")
 }
 
