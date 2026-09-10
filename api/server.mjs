@@ -163,8 +163,9 @@ function buildIngressRoute(name, domain) {
 // (WebRTC remote desktop on :8080). Selkies ships a portable gstreamer>=1.22
 // runtime because jammy's gstreamer 1.20 lacks the GstWebRTC GIR binding.
 // Unit files are written via write_files (heredocs inside runcmd break).
-// Shell ${...} vars are written as $${...} so Flux postBuild envsubst leaves
-// them alone (Flux renders $${ as literal ${ ).
+// Shell variables inside the generated cloud-init text must be escaped with
+// a leading extra dollar sign so the Flux postBuild substitution leaves
+// shell-expansion constructs intact for the guest.
 const SELKIES_UNIT = [
   "[Unit]",
   "Description=Selkies WebRTC Desktop Stream",
