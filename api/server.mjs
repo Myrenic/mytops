@@ -154,17 +154,37 @@ function buildIngressRoute(name, domain) {
 
 // ── VM helpers ───────────────────────────────────────────────────────
 
-// Cloud-init user-data for Ubuntu + xfce4 + xrdp.  No template literals
-// to avoid Flux postBuild envsubst conflicts in the ConfigMap.
+// Cloud-init user-data for Ubuntu + xfce4 + Selkies (WebSocket remote desktop).
+// No template literals to avoid Flux postBuild envsubst conflicts in the ConfigMap.
 function cloudInitUserData() {
   return [
     "#cloud-config",
     "package_update: true",
     "packages:",
     "  - xfce4",
-    "  - xrdp",
     "  - xfce4-terminal",
     "  - dbus-x11",
+    "  - pulseaudio",
+    "  - python3",
+    "  - python3-pip",
+    "  - python3-dev",
+    "  - jq",
+    "  - ca-certificates",
+    "  - curl",
+    "  - xserver-xorg-core",
+    "  - xvfb",
+    "  - wmctrl",
+    "  - x11-utils",
+    "  - x11-xkb-utils",
+    "  - x11-xserver-utils",
+    "  - libx11-xcb1",
+    "  - libxcb-dri3-0",
+    "  - libxkbcommon0",
+    "  - libxdamage1",
+    "  - libxfixes3",
+    "  - libxtst6",
+    "  - libxext6",
+    "  - libpulse0",
     "users:",
     "  - default",
     "  - name: user",
@@ -175,8 +195,27 @@ function cloudInitUserData() {
     "runcmd:",
     "  - echo 'xfce4-session' > /home/user/.xsession",
     "  - chown user:user /home/user/.xsession",
-    "  - systemctl enable xrdp",
-    "  - systemctl enable xrdp-sesman",
+    // Selkies: low-latency WebSocket remote desktop on :8080
+    "  - pip3 install selkies",
+    "  - |",
+    "    cat > /etc/systemd/system/selkies.service << 'SELEOF",
+    "    [Unit]",
+    "    Description=Selkies Web Remote Desktop",
+    "    After=network.target graphical.target",
+    "    Wants=graphical.target",
+    "    [Service]",
+    "    User=user",
+    "    Environment=DISPLAY=:0",
+    "    ExecStartPre=/usr/bin/sleep 10",
+    "    ExecStart=/usr/local/bin/selkies --addr=0.0.0.0 --port=8080 --enable-https=false --encoder=h264enc --enable-resize=false",
+    "    Restart=always",
+    "    RestartSec=3",
+    "    [Install]",
+    "    WantedBy=multi-user.target",
+    "    SELEOF",
+    "  - systemctl daemon-reload",
+    "  - systemctl enable selkies",
+    "  - systemctl start selkies",
   ].join("\n")
 }
 
@@ -274,7 +313,7 @@ function buildVmService(name) {
     spec: {
       selector: { "app.kubernetes.io/name": name },
       ports: [
-        { name: "rdp", port: 3389, targetPort: 3389 },
+        { name: "http", port: 8080, targetPort: 8080 },
       ],
     },
   }
@@ -284,8 +323,8 @@ function isVmRuntime(runtime) {
   return runtime && runtime.startsWith("vm-")
 }
 
-function guacamoleUrl(domain) {
-  return "https://rdp." + domain + GUACAMOLE_PATH
+function vmWorkspaceUrl(name, domain) {
+  return "https://" + name + ".apps." + domain
 }
 
 // ── Route handlers ───────────────────────────────────────────────────
@@ -357,7 +396,7 @@ async function handleListWorkspaces(req, res, identity) {
         runtime: entry?.runtime ?? "vm-linux",
         icon: entry?.icon,
         status: ready ? "running" : "starting",
-        url: guacamoleUrl(domain),
+        url: vmWorkspaceUrl(name, domain),
       }
     })
 
@@ -444,7 +483,7 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
   const existing = await kubeFetch("GET", vmPath, null, req.headers)
   if (existing.kind !== "Status") {
     return json(res, 200, {
-      id: entry.id, name, status: "running", url: guacamoleUrl(domain),
+      id: entry.id, name, status: "running", url: vmWorkspaceUrl(name, domain),
     })
   }
 
@@ -458,6 +497,14 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
       buildVmService(name), req.headers)
   }
 
+  // Create IngressRoute for the VM workspace (Selkies on :8080).
+  const irPath = "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name
+  const irExists = await kubeFetch("GET", irPath, null, req.headers)
+  if (irExists.kind === "Status") {
+    await kubeFetch("POST", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
+      buildIngressRoute(name, domain), req.headers)
+  }
+
   // Wait for VM readiness (up to 5 min — image import + cloud-init).
   const deadline = Date.now() + 300_000
   while (Date.now() < deadline) {
@@ -465,13 +512,13 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
     const vm = await kubeFetch("GET", vmPath, null, req.headers)
     if (vm.status?.ready) {
       return json(res, 200, {
-        id: entry.id, name, status: "running", url: guacamoleUrl(domain),
+        id: entry.id, name, status: "running", url: vmWorkspaceUrl(name, domain),
       })
     }
   }
 
   json(res, 200, {
-    id: entry.id, name, status: "starting", url: guacamoleUrl(domain),
+    id: entry.id, name, status: "starting", url: vmWorkspaceUrl(name, domain),
   })
 }
 
@@ -488,6 +535,7 @@ async function handleDeleteWorkspace(req, res, identity, entryId) {
   // Best-effort delete VM resources.
   await kubeFetch("DELETE", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name, null, req.headers).catch(() => {})
   await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc", null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name, null, req.headers).catch(() => {})
 
   json(res, 200, { ok: true })
 }

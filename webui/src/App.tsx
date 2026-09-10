@@ -205,13 +205,6 @@ export function App() {
     try {
       const ws = await createWorkspace(e.id)
 
-      // VM workspaces open in Guacamole (new tab) — no iframe.
-      if (ws.runtime?.startsWith("vm-") || e.runtime?.startsWith("vm-")) {
-        setOverlay(null)
-        window.open(ws.url, "_blank", "noopener")
-        return
-      }
-
       setWorkspaces((prev) =>
         prev.some((w) => w.id === e.id) ? prev : [...prev, { ...ws, icon: e.icon }]
       )
