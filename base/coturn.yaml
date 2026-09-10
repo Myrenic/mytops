@@ -72,5 +72,6 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+              add: ["TO_PORTS"]
             seccompProfile:
               type: RuntimeDefault
