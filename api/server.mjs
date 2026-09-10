@@ -139,7 +139,10 @@ function buildService(name, owner, entryId) {
   }
 }
 
-function buildIngressRoute(name, domain) {
+// opts.svc overrides the backend (container default: <name> in `services`
+// on 3000; VM workspaces use <name>-svc in the kubevirt ns on 8080).
+function buildIngressRoute(name, domain, opts) {
+  const svc = opts?.svc ?? { name, namespace: NAMESPACE, port: 3000 }
   return {
     apiVersion: "traefik.io/v1alpha1",
     kind: "IngressRoute",
@@ -150,7 +153,7 @@ function buildIngressRoute(name, domain) {
         {
           match: "Host(`" + name + "." + domain + "`)",
           kind: "Rule",
-          services: [{ name, namespace: NAMESPACE, port: 3000 }],
+          services: [svc],
         },
       ],
       tls: { secretName: "domain-0-prod-tls" },
@@ -580,7 +583,11 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
   const irExists = await kubeFetch("GET", irPath, null, req.headers)
   if (irExists.kind === "Status") {
     await kubeFetch("POST", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
-      buildIngressRoute(name, domain), req.headers)
+      buildIngressRoute(name, domain, { svc: { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 } }), req.headers)
+  } else if (irExists.spec?.routes?.[0]?.services?.[0]?.port === 3000) {
+    // Repair pre-fix VM routes that pointed at the container backend.
+    await kubeFetch("PUT", irPath, buildIngressRoute(name, domain,
+      { svc: { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 } }), req.headers)
   }
 
   // Wait for VM readiness (up to 5 min — image import + cloud-init).
