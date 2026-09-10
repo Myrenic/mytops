@@ -8,23 +8,8 @@ metadata:
         app.kubernetes.io/component: turn
 type: Opaque
 stringData:
-    #ENC[AES256_GCM,data:IMQt0xtWda1Hzr+K9Ro41q/2F/O8dHdS1c+4QNBm3Y7KAnKIhr/nsDu++dkrgalwLPAcHnpjjIQu8SrattjXRa442Tw=,iv:n9Hk1EBrQTufkZQIxKnxSs/oIyfM9rsOynTvDPy+CxM=,tag:pDLfz7keYPi12sr3szH1Sw==,type:comment]
-    TURN_HOST: ENC[AES256_GCM,data:ZFFbW/YYX2eVK8Y=,iv:H84pL9BkiXM6+AD31aDdf2Sq7KHORLs4Fq5km0ybIes=,tag:AoHMXQgqHXLxyWM9wwV9BQ==,type:str]
-    TURN_PORT: ENC[AES256_GCM,data:nKkvPQ==,iv:T+aX6vzxuGnG9Eg37nOFDqlg04DDzBtRDGjkrPrDUl8=,tag:UeY4jkyTC98mXLkT5qvDOA==,type:str]
-    TURN_PROTOCOL: ENC[AES256_GCM,data:dy8e,iv:3eeSdppGERHNIUs4M6xdfg7YXp4Cf/tGLE2DaHvOYqU=,tag:ZoNP1mfLMfYjWgjk4DDTIg==,type:str]
-    TURN_SHARED_SECRET: ENC[AES256_GCM,data:FIsI5Ubrc87CWc/U9PiAmH9+dXQtoA==,iv:hdezkBQQSa+f/ERfAbSAQcNOCAj0cOw/1C60eQYvZxY=,tag:Y01MeDMC6+l8vx+Rnj/Bow==,type:str]
-sops:
-    age:
-        - enc: |
-            -----BEGIN AGE ENCRYPTED FILE-----
-            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBWWjN4YWplcVVaei9WdWtr
-            UlVBOXIvSHZ3N1Q2dzQ2K2grYzJhYVk4MkgwCk9KQ29qaWVJTlRWbzZ2dm9Kcm1H
-            MWR3ajUyc1JYQndJcGFRY0NiWGlkME0KLS0tIHBuRGRkdCtMazRxQ3Q2eWxOSnVV
-            Vkx3c0xFRUU4UTk4Y0FVM0l3clRGb0kKP/hwDjFhlViZ9hmo2g+6uPTcNQ9Aw55I
-            GhehEi87HrKTnEp3SHrGXXgbvHEggdd+eF2R9UMSV5FgaFOEpN3Z/A==
-            -----END AGE ENCRYPTED FILE-----
-          recipient: age10qpu76yk6rvyaunmsadkej3l0pwuk4mn4uhxnem4cyl9zjrucgmsndh72v
-    encrypted_regex: ^(data|stringData)$
-    lastmodified: "2026-09-10T15:12:29Z"
-    mac: ENC[AES256_GCM,data:pt6GsnwOeNDlKnIX/y4v2XBCb+FscdyLFBBVv+YXlNdsKloQN1ud4VCtbSi/Yl480kFK/83pUEGjTWsxLSI4/pdQn28NVAsC+s6MMFx4m3vDzv86AMz2LeT2BVHlmoF5EtMWZAY93oHabYLsiFdu2qUl7FVlCxj+6FGhUbDABQs=,iv:WQDaYQZn7I5ln+da0fki28pQmeu+ulWeAp7TcRDX5kE=,tag:FtTWl6GqXsSUz0gFiu1NhQ==,type:str]
-    version: 3.13.3
+    # URL the browser+VM RTCPeer is given for TURN (coturn, hostNetwork).
+    TURN_HOST: 10.0.50.116
+    TURN_PORT: "3478"
+    TURN_PROTOCOL: udp
+    TURN_SHARED_SECRET: "i0cJ3ISQe8EpBLMRyXBmusHkSut2mn0nuNzodKuU"
