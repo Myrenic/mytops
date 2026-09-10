@@ -69,6 +69,9 @@ spec:
             # it while it settles.
             - name: WORKSPACE_NODE
               value: "talos-45w-c87"
+          envFrom:
+            - secretRef:
+                name: chacdn-turn
           volumeMounts:
             - name: api-catalog
               mountPath: /etc/chacdn

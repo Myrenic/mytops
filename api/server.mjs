@@ -172,6 +172,14 @@ function buildIngressRoute(name, domain, opts) {
 // Shell variables inside the generated cloud-init text must be escaped with
 // a leading extra dollar sign so the Flux postBuild substitution leaves
 // shell-expansion constructs intact for the guest.
+// TURN credentials for the streamer (chacdn-turn Secret, deployed with the
+// coturn manifest). Literal values are injected when the user-data is built
+// at create time — no shell vars survive into the generated cloud-init.
+const TURN_HOST = process.env.TURN_HOST || ""
+const TURN_PORT = process.env.TURN_PORT || "3478"
+const TURN_PROTOCOL = process.env.TURN_PROTOCOL || "udp"
+const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || ""
+
 const SELKIES_UNIT = [
   "[Unit]",
   "Description=Selkies WebRTC Desktop Stream",
@@ -184,7 +192,10 @@ const SELKIES_UNIT = [
   "Environment=XDG_RUNTIME_DIR=/tmp",
   // enable_basic_auth=false: authentication is oauth2-proxy (Keycloak) at the
   // ingress; avoid the second basic-auth popup.
-  "ExecStart=/opt/selkies-gstreamer/bin/selkies-gstreamer-run --addr=0.0.0.0 --port=8080 --enable_https=false --encoder=x264enc --enable_resize=false --enable_basic_auth=false",
+  "ExecStart=/opt/selkies-gstreamer/bin/selkies-gstreamer-run --addr=0.0.0.0 --port=8080 --enable_https=false --encoder=x264enc --enable_resize=false --enable_basic_auth=false"
+    + (TURN_HOST && TURN_SHARED_SECRET
+      ? " --turn_host=" + TURN_HOST + " --turn_port=" + TURN_PORT + " --turn_protocol=" + TURN_PROTOCOL + " --turn_tls=false --turn_shared_secret=" + TURN_SHARED_SECRET
+      : ""),
   "Restart=always",
   "RestartSec=5",
   "[Install]",

@@ -9,4 +9,6 @@ resources:
   - ./chacdn-workplace-api.configmap.json
   - ./idle-culler.yaml
   - ./idle-culler-script.yaml
+  - ./chacdn-turn.sops.yaml
+  - ./coturn.yaml
   - ./chacdn-webui.configmap.json
