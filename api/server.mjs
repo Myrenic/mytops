@@ -153,6 +153,8 @@ function buildIngressRoute(name, domain, opts) {
         {
           match: "Host(`" + name + "." + domain + "`)",
           kind: "Rule",
+          // Keycloak SSO at the edge — replaces selkies/webtop basic auth.
+          middlewares: [{ name: "oauth2-proxy-auth", namespace: "network" }],
           services: [svc],
         },
       ],
@@ -180,7 +182,9 @@ const SELKIES_UNIT = [
   "Environment=DISPLAY=:0",
   "Environment=PIPEWIRE_LATENCY=128/48000",
   "Environment=XDG_RUNTIME_DIR=/tmp",
-  "ExecStart=/opt/selkies-gstreamer/bin/selkies-gstreamer-run --addr=0.0.0.0 --port=8080 --enable_https=false --encoder=x264enc --enable_resize=false --basic_auth_user=user --basic_auth_password=mypasswd",
+  // enable_basic_auth=false: authentication is oauth2-proxy (Keycloak) at the
+  // ingress; avoid the second basic-auth popup.
+  "ExecStart=/opt/selkies-gstreamer/bin/selkies-gstreamer-run --addr=0.0.0.0 --port=8080 --enable_https=false --encoder=x264enc --enable_resize=false --enable_basic_auth=false",
   "Restart=always",
   "RestartSec=5",
   "[Install]",
