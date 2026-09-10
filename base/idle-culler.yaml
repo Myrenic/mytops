@@ -37,44 +37,45 @@ spec:
                 - -c
                 - |
                   set -eu
-                  MAX_MINUTES=${MAX_LIFETIME_MINUTES:-480}
-                  echo "Culling workspaces older than ${MAX_MINUTES}m (skipping persistent)"
+                  # Flux postBuild envsubst eats ${...} — write shell vars as $${...}.
+                  MAX_MINUTES=$${MAX_LIFETIME_MINUTES:-480}
+                  echo "Culling workspaces older than $${MAX_MINUTES}m (skipping persistent)"
 
                   # List all chacdn session deployments with lifecycle labels
-                  DEPLOYMENTS=$(kubectl get deploy -n services \
+                  DEPLOYMENTS=$$(kubectl get deploy -n services \
                     -l app.kubernetes.io/component=session \
                     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\t"}{.metadata.labels.chacdn-owner}{"\t"}{.metadata.labels.chacdn-lifecycle}{"\t"}{.metadata.labels.chacdn-entry}{"\n"}{end}')
 
-                  NOW=$(date +%s)
+                  NOW=$$(date +%s)
                   CULLED=0
 
                   while IFS=$'\t' read -r name created owner lifecycle entryId; do
-                    [ -z "$name" ] && continue
+                    [ -z "$$name" ] && continue
 
                     # Never cull persistent workspaces
-                    if [ "$lifecycle" = "persistent" ]; then
-                      echo "Skipping ${name} (lifecycle=persistent, owner: ${owner})"
+                    if [ "$$lifecycle" = "persistent" ]; then
+                      echo "Skipping $${name} (lifecycle=persistent, owner: $${owner})"
                       continue
                     fi
 
-                    CREATED_TS=$(date -d "$created" +%s 2>/dev/null || echo 0)
-                    AGE_MINUTES=$(( (NOW - CREATED_TS) / 60 ))
+                    CREATED_TS=$$(date -d "$$created" +%s 2>/dev/null || echo 0)
+                    AGE_MINUTES=$$(( (NOW - CREATED_TS) / 60 ))
 
-                    if [ "$AGE_MINUTES" -ge "$MAX_MINUTES" ]; then
-                      echo "Culling ${name} (age: ${AGE_MINUTES}m, lifecycle: ${lifecycle:-ephemeral}, owner: ${owner})"
+                    if [ "$$AGE_MINUTES" -ge "$$MAX_MINUTES" ]; then
+                      echo "Culling $${name} (age: $${AGE_MINUTES}m, lifecycle: $${lifecycle:-ephemeral}, owner: $${owner})"
                       # Best-effort cleanup: Deployment + Service + IngressRoute
-                      kubectl delete deploy "$name" -n services --ignore-not-found 2>&1 || true
-                      kubectl delete svc "$name" -n services --ignore-not-found 2>&1 || true
-                      kubectl delete ingressroute "$name" -n network --ignore-not-found 2>&1 || true
+                      kubectl delete deploy "$$name" -n services --ignore-not-found 2>&1 || true
+                      kubectl delete svc "$$name" -n services --ignore-not-found 2>&1 || true
+                      kubectl delete ingressroute "$$name" -n network --ignore-not-found 2>&1 || true
                       # Also delete disposable PVCs
-                      if [ "$lifecycle" != "persistent" ] && [ -n "$entryId" ]; then
-                        kubectl delete pvc "chacdn-home-${entryId}-${owner}" -n services --ignore-not-found 2>&1 || true
+                      if [ "$$lifecycle" != "persistent" ] && [ -n "$$entryId" ]; then
+                        kubectl delete pvc "chacdn-home-$${entryId}-$${owner}" -n services --ignore-not-found 2>&1 || true
                       fi
-                      CULLED=$((CULLED + 1))
+                      CULLED=$$((CULLED + 1))
                     fi
-                  done <<< "$DEPLOYMENTS"
+                  done <<< "$$DEPLOYMENTS"
 
-                  echo "Done. Culled ${CULLED} workspace(s)."
+                  echo "Done. Culled $${CULLED} workspace(s)."
               env:
                 - name: MAX_LIFETIME_MINUTES
                   value: "480"

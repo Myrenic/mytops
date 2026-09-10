@@ -52,15 +52,20 @@ function baseDomain(host) {
   return parts.length > 1 ? parts.slice(1).join(".") : host
 }
 
-// Forward a request to the kubectl-proxy (localhost:8001) using the same
-// identity headers the browser sent (X-Auth-Request-*).  Returns the
-// parsed JSON body or throws.
-async function kubeFetch(method, path, body, identityHeaders) {
-  const headers = { ...identityHeaders, "Content-Type": "application/json" }
+// Forward a request to the kubectl-proxy (localhost:8001).  Only the
+// oauth2-proxy identity headers (X-Auth-Request-*) are forwarded, never the
+// raw incoming headers — passing content-length/host from the browser request
+// makes the fetch hang when the forwarded body size differs.
+async function kubeFetch(method, path, body, reqHeaders) {
+  const headers = { "Content-Type": "application/json" }
+  for (const key of Object.keys(reqHeaders)) {
+    if (key.toLowerCase().startsWith("x-auth-request-")) headers[key] = reqHeaders[key]
+  }
   const opts = { method, headers }
   if (body) opts.body = JSON.stringify(body)
   const res = await fetch(KUBE_API + path, opts)
   const text = await res.text()
+  if (!res.ok) console.error("kube-api " + method + " " + path + " -> " + res.status + " " + text.slice(0, 300))
   try { return JSON.parse(text) } catch { return text }
 }
 
@@ -154,37 +159,45 @@ function buildIngressRoute(name, domain) {
 
 // ── VM helpers ───────────────────────────────────────────────────────
 
-// Cloud-init user-data for Ubuntu + xfce4 + Selkies (WebSocket remote desktop).
-// No template literals to avoid Flux postBuild envsubst conflicts in the ConfigMap.
+// Cloud-init user-data for Ubuntu jammy + xfce4 desktop + Selkies-GStreamer
+// (WebRTC remote desktop on :8080). Selkies ships a portable gstreamer>=1.22
+// runtime because jammy's gstreamer 1.20 lacks the GstWebRTC GIR binding.
+// Unit files are written via write_files (heredocs inside runcmd break).
+// Shell ${...} vars are written as $${...} so Flux postBuild envsubst leaves
+// them alone (Flux renders $${ as literal ${ ).
+const SELKIES_UNIT = [
+  "[Unit]",
+  "Description=Selkies WebRTC Desktop Stream",
+  "Requires=selkies-x.service",
+  "After=selkies-x.service",
+  "[Service]",
+  "User=user",
+  "Environment=DISPLAY=:0",
+  "Environment=PIPEWIRE_LATENCY=128/48000",
+  "Environment=XDG_RUNTIME_DIR=/tmp",
+  "ExecStart=/opt/selkies-gstreamer/bin/selkies-gstreamer-run --addr=0.0.0.0 --port=8080 --enable_https=false --encoder=x264enc --enable_resize=false --basic_auth_user=user --basic_auth_password=mypasswd",
+  "Restart=always",
+  "RestartSec=5",
+  "[Install]",
+  "WantedBy=multi-user.target",
+].join("\n")
+
+const SELKIES_X_UNIT = [
+  "[Unit]",
+  "Description=Xvfb XFCE desktop on :0",
+  "After=network.target",
+  "[Service]",
+  "User=user",
+  "ExecStart=/bin/sh -c 'Xvfb :0 -screen 0 1920x1080x24 -ac & sleep 2; exec startxfce4'",
+  "Restart=always",
+  "RestartSec=3",
+  "[Install]",
+  "WantedBy=multi-user.target",
+].join("\n")
+
 function cloudInitUserData() {
   return [
     "#cloud-config",
-    "package_update: true",
-    "packages:",
-    "  - xfce4",
-    "  - xfce4-terminal",
-    "  - dbus-x11",
-    "  - pulseaudio",
-    "  - python3",
-    "  - python3-pip",
-    "  - python3-dev",
-    "  - jq",
-    "  - ca-certificates",
-    "  - curl",
-    "  - xserver-xorg-core",
-    "  - xvfb",
-    "  - wmctrl",
-    "  - x11-utils",
-    "  - x11-xkb-utils",
-    "  - x11-xserver-utils",
-    "  - libx11-xcb1",
-    "  - libxcb-dri3-0",
-    "  - libxkbcommon0",
-    "  - libxdamage1",
-    "  - libxfixes3",
-    "  - libxtst6",
-    "  - libxext6",
-    "  - libpulse0",
     "users:",
     "  - default",
     "  - name: user",
@@ -192,30 +205,44 @@ function cloudInitUserData() {
     "    lock_passwd: false",
     "    shell: /bin/bash",
     "    groups: sudo, ssl-cert",
+    // write_files: heredocs inside runcmd break, so unit files land from here.
+    "write_files:",
+    "  - path: /etc/systemd/system/selkies-x.service",
+    "    permissions: '0644'",
+    "    content: |",
+    "      " + SELKIES_X_UNIT.split("\n").join("\n      "),
+    "  - path: /etc/systemd/system/selkies.service",
+    "    permissions: '0640'",
+    "    content: |",
+    "      " + SELKIES_UNIT.split("\n").join("\n      "),
+    // Not the packages: block — it does not retry and one transient mirror
+    // hiccup killed the entire first boot (verified). Retry the install.
     "runcmd:",
+    "  - |",
+    "    for i in 1 2 3 4 5; do",
+    "      apt-get update -o Acquire::Retries=5 >/dev/null 2>&1 && break",
+    "      sleep 10",
+    "    done",
+    "    for i in 1 2 3; do",
+    "      apt-get install -y -o Acquire::Retries=5 --no-install-recommends xfce4 xfce4-terminal dbus-x11 pulseaudio python3 python3-pip python3-dev jq tar gzip ca-certificates curl build-essential libgcrypt20 libgirepository-1.0-1 glib-networking alsa-utils libpulse0 libopus0 libvpx-dev x264 wmctrl xsel xdotool wayland-protocols libwayland-dev libwayland-egl1 x11-utils x11-xkb-utils x11-xserver-utils xserver-xorg-core xvfb libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 libxv1 libxtst6 libxext6 >/var/log/chacdn-packages.log 2>&1 && break",
+    "      sleep 30",
+    "    done",
     "  - echo 'xfce4-session' > /home/user/.xsession",
     "  - chown user:user /home/user/.xsession",
-    // Selkies: low-latency WebSocket remote desktop on :8080
-    "  - pip3 install selkies",
+    // Selkies portable runtime: self-contained gstreamer with WebRTC support
+    // (asset ~200MB; retry generously).
     "  - |",
-    "    cat > /etc/systemd/system/selkies.service << 'SELEOF",
-    "    [Unit]",
-    "    Description=Selkies Web Remote Desktop",
-    "    After=network.target graphical.target",
-    "    Wants=graphical.target",
-    "    [Service]",
-    "    User=user",
-    "    Environment=DISPLAY=:0",
-    "    ExecStartPre=/usr/bin/sleep 10",
-    "    ExecStart=/usr/local/bin/selkies --addr=0.0.0.0 --port=8080 --enable-https=false --encoder=h264enc --enable-resize=false",
-    "    Restart=always",
-    "    RestartSec=3",
-    "    [Install]",
-    "    WantedBy=multi-user.target",
-    "    SELEOF",
+    "    for i in 1 2 3 4 5; do",
+    "      curl -fsSL 'https://github.com/selkies-project/selkies-gstreamer/releases/download/v1.6.2/selkies-gstreamer-portable-v1.6.2_amd64.tar.gz' -o /opt/selkies.tar.gz && break",
+    "      sleep 15",
+    "    done",
+    "    tar -xzf /opt/selkies.tar.gz -C /opt",
+    "    chown -R user:user /opt/selkies-gstreamer",
+    // Streamer: own service is written by write_files. Basic auth is a second
+    // gate behind oauth2-proxy; password is the selkies-documented default.
     "  - systemctl daemon-reload",
-    "  - systemctl enable selkies",
-    "  - systemctl start selkies",
+    "  - systemctl enable selkies-x selkies",
+    "  - systemctl start selkies-x selkies",
   ].join("\n")
 }
 
@@ -274,7 +301,9 @@ function buildVirtualMachine(entry, name, owner) {
             {
               name: "cloudinit",
               cloudInitNoCloud: {
-                userData: cloudInitUserData(),
+                // NOTE: field is `secretRef` even though the Go type is
+                // UserDataSecretRef.
+                secretRef: { name: name + "-cloudinit" },
               },
             },
           ],
@@ -316,6 +345,21 @@ function buildVmService(name) {
         { name: "http", port: 8080, targetPort: 8080 },
       ],
     },
+  }
+}
+
+// The VM validator rejects inline cloudInitNoCloud userData > 2048 bytes, so
+// the user-data goes into a Secret referenced via userDataSecretRef.
+function buildCloudInitSecret(name, userData) {
+  return {
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: {
+      name: name + "-cloudinit",
+      namespace: VM_NAMESPACE,
+      labels: { "app.kubernetes.io/name": name },
+    },
+    data: { userData: Buffer.from(userData).toString("base64") },
   }
 }
 
@@ -479,7 +523,6 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
 // ── VM workspace creation ────────────────────────────────────────────
 async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
   const vmPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name
-
   const existing = await kubeFetch("GET", vmPath, null, req.headers)
   if (existing.kind !== "Status") {
     return json(res, 200, {
@@ -487,8 +530,21 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
     })
   }
 
-  await kubeFetch("POST", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines",
+  const secretPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit"
+  const secExists = await kubeFetch("GET", secretPath, null, req.headers)
+  if (secExists.kind === "Status") {
+    const sec = await kubeFetch("POST", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets",
+      buildCloudInitSecret(name, cloudInitUserData()), req.headers)
+    if (sec.kind === "Status") {
+      return json(res, 500, { error: "cloud-init secret: " + (sec.message ?? "failed") })
+    }
+  }
+
+  const created = await kubeFetch("POST", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines",
     buildVirtualMachine(entry, name, slug), req.headers)
+  if (created.kind === "Status") {
+    return json(res, 500, { error: created.message ?? "VM create failed" })
+  }
 
   const svcPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc"
   const svcExists = await kubeFetch("GET", svcPath, null, req.headers)
@@ -535,6 +591,7 @@ async function handleDeleteWorkspace(req, res, identity, entryId) {
   // Best-effort delete VM resources.
   await kubeFetch("DELETE", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name, null, req.headers).catch(() => {})
   await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc", null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit", null, req.headers).catch(() => {})
   await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name, null, req.headers).catch(() => {})
 
   json(res, 200, { ok: true })
