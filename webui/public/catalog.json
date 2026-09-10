@@ -52,7 +52,7 @@
       "type": "desktop",
       "runtime": "vm-linux",
       "persistence": "persistent",
-      "lifecycle": "ephemeral",
+      "lifecycle": "persistent",
       "icon": "🖥️",
       "resources": { "cpu": "2", "memory": "2Gi" },
       "storage": "10Gi",

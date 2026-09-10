@@ -368,10 +368,21 @@ function isVmRuntime(runtime) {
 }
 
 function vmWorkspaceUrl(name, domain) {
-  return "https://" + name + ".apps." + domain
+  // Same single-level host as containers — the wildcard cert only covers
+  // *.tuntelder.com (one level), so no extra "apps." component.
+  return "https://" + name + "." + domain
 }
 
 // ── Route handlers ───────────────────────────────────────────────────
+
+// Admin group gate (X-Auth-Request-Groups from oauth2-proxy).
+const ADMIN_GROUPS = new Set(
+  (process.env.ADMIN_GROUPS || "admin,admins").split(",").map((g) => g.trim()).filter(Boolean),
+)
+
+function isAdmin(identity) {
+  return (identity.groups ?? "").split(",").some((g) => ADMIN_GROUPS.has(g.trim()))
+}
 
 // GET /api/health
 function handleHealth(_req, res) {
@@ -597,6 +608,53 @@ async function handleDeleteWorkspace(req, res, identity, entryId) {
   json(res, 200, { ok: true })
 }
 
+// Admin: list ALL workspaces regardless of owner.
+async function handleAdminList(req, res, identity) {
+  if (!isAdmin(identity)) return json(res, 403, { error: "not admin" })
+
+  const sap = await kubeFetch("GET",
+    "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments?labelSelector=app.kubernetes.io/component%3Dsession",
+    null, req.headers)
+  const containers = (sap.items ?? []).map((d) => ({
+    name: d.metadata.name,
+    owner: d.metadata.labels?.["chacdn-owner"] ?? "",
+    lifecycle: d.metadata.labels?.["chacdn-lifecycle"] ?? "",
+    runtime: "container",
+    ready: (d.status?.readyReplicas ?? 0) >= 1,
+  }))
+
+  const vmPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines"
+  let vms = []
+  try {
+    const vmsList = await kubeFetch("GET", vmPath + "?labelSelector=chacdn-runtime", null, req.headers)
+    vms = (vmsList.items ?? []).map((vm) => ({
+      name: vm.metadata.name,
+      owner: vm.metadata.labels?.["chacdn-owner"] ?? "",
+      lifecycle: vm.metadata.labels?.["chacdn-lifecycle"] ?? "",
+      runtime: "vm",
+      ready: vm.status?.ready ?? false,
+    }))
+  } catch { /* KubeVirt not installed */ }
+
+  json(res, 200, containers.concat(vms))
+}
+
+// Admin: destroy a workspace by full object name (ws-<entryId>-<slug>). The
+// cloud-init Secret and VM Service use `<name>`-suffixed variants.
+async function handleAdminDelete(req, res, identity, target) {
+  if (!isAdmin(identity)) return json(res, 403, { error: "not admin" })
+  if (!/^ws-[a-z0-9-]+$/.test(target)) return json(res, 400, { error: "bad workspace name" })
+
+  await kubeFetch("DELETE", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + target, null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/api/v1/namespaces/" + NAMESPACE + "/services/" + target, null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + target, null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + target + "-svc", null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + target + "-cloudinit", null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + target, null, req.headers).catch(() => {})
+
+  json(res, 200, { ok: true })
+}
+
 // POST /api/workspaces/:entryId/restart — rolling-restart a workspace.
 async function handleRestartWorkspace(req, res, identity, entryId) {
   const slug = slugFor(identity.email)
@@ -662,6 +720,11 @@ const server = createServer(async (req, res) => {
       if (req.method === "DELETE") return handleDeleteWorkspace(req, res, identity, entryId)
       if (req.method === "POST") return handleRestartWorkspace(req, res, identity, entryId)
     }
+
+    // Admin cleanup (ADMIN_GROUPS gate).
+    if (path === "/api/admin/workspaces" && req.method === "GET") return handleAdminList(req, res, identity)
+    const adminMatch = path.match(/^\/api\/admin\/workspaces\/([^/]+)$/)
+    if (adminMatch && req.method === "DELETE") return handleAdminDelete(req, res, identity, decodeURIComponent(adminMatch[1]))
 
     json(res, 404, { error: "not found" })
   } catch (err) {
