@@ -283,13 +283,14 @@ function cloudInitUserData() {
     "      apt-get install -y -o Acquire::Retries=5 --no-install-recommends xfce4 xfce4-terminal dbus-x11 libgl1 libgbm1 ca-certificates curl jq procps libpulse0 pulseaudio >/var/log/chacdn-packages.log 2>&1 && break",
     "      sleep 30",
     "    done",
-    // KasmVNC from kasmtech releases: the exact engine the LSIO webtops embed.
+    // KasmVNC from kasmtech: the same engine the LSIO webtop containers embed.
+    // force-confold keeps our pre-seeded /etc/kasmvnc/kasmvnc.yaml.
     "  - |",
     "    for i in 1 2 3 4 5; do",
     "      curl -fsSL 'https://github.com/kasmtech/KasmVNC/releases/download/v1.5.0/kasmvncserver_jammy_1.5.0_amd64.deb' -o /tmp/kasmvncserver.deb && break",
     "      sleep 15",
     "    done",
-    "    apt-get install -y -o Acquire::Retries=5 /tmp/kasmvncserver.deb >/var/log/chacdn-kasmvnc.log 2>&1 || apt-get install -f -y >/var/log/chacdn-kasmvnc.log 2>&1",
+    "    DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=5 -o Dpkg::Options::=--force-confold /tmp/kasmvncserver.deb >/var/log/chacdn-kasmvnc.log 2>&1 || apt-get install -f -y -o Dpkg::Options::=--force-confold >/var/log/chacdn-kasmvnc.log 2>&1",
     "  - chown -R user:user /home/user/.vnc",
     "  - systemctl daemon-reload",
     "  - systemctl enable kasmvnc-x kasmvnc-session",
