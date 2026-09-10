@@ -71,7 +71,8 @@ spec:
             runAsGroup: 1000
             allowPrivilegeEscalation: false
             capabilities:
-              drop: ["ALL"]
-              add: ["TO_PORTS"]
+              # turnserver binary has file caps; dropping the bounding set
+              # entirely makes exec() fail with EPERM.
+              add: ["NET_BIND_SERVICE", "TO_PORTS"]
             seccompProfile:
               type: RuntimeDefault
