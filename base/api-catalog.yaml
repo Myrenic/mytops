@@ -38,6 +38,19 @@ data:
             { "name": "RESTART_APP", "value": "true" }
           ],
           "groups": ["firefox"]
+        },
+        {
+          "id": "ubuntu-vm",
+          "name": "Ubuntu VM",
+          "description": "Full Ubuntu 22.04 VM with xfce4 desktop (RDP via Guacamole).",
+          "type": "desktop",
+          "runtime": "vm-linux",
+          "persistence": "persistent",
+          "lifecycle": "ephemeral",
+          "icon": "🖥️",
+          "resources": { "cpu": "2", "memory": "2Gi" },
+          "storage": "10Gi",
+          "groups": ["ubuntu-vm"]
         }
       ]
     }
