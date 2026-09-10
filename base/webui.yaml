@@ -63,6 +63,12 @@ spec:
               value: "services"
             - name: CATALOG_PATH
               value: "/etc/chacdn/catalog.json"
+            # Streaming desktops are frame-latency sensitive; talos-sz9-1vs
+            # carries more control-plane churn (etcd, apiserver) and panicked
+            # to load 10.6/8 vs 0.9 on talos-45w-c87. Move workspace pods off
+            # it while it settles.
+            - name: WORKSPACE_NODE
+              value: "talos-45w-c87"
           volumeMounts:
             - name: api-catalog
               mountPath: /etc/chacdn

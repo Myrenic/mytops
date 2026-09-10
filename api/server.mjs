@@ -96,6 +96,7 @@ function buildDeployment(entry, name, owner) {
       template: {
         metadata: { labels: { "app.kubernetes.io/name": "chacdn", "app.kubernetes.io/component": "session", "chacdn-owner": owner, "chacdn-entry": entry.id } },
         spec: {
+          nodeSelector: nodeSelector(),
           containers: [
             {
               name: "workspace",
@@ -247,9 +248,17 @@ function cloudInitUserData() {
   ].join("\n")
 }
 
-// VM image URL — pinned Ubuntu 22.04 cloud image.
 const VM_IMAGE_URL =
   "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+
+// Optional pin: streaming workloads should run on the least-loaded node
+// (control-plane nodes with etcd churn are poor homes for frame-latency
+// sensitive desktops). Empty = let the scheduler decide.
+const WORKSPACE_NODE = process.env.WORKSPACE_NODE || ""
+
+function nodeSelector() {
+  return WORKSPACE_NODE ? { "kubernetes.io/hostname": WORKSPACE_NODE } : {}
+}
 
 function buildVirtualMachine(entry, name, owner) {
   const cpu = parseInt(entry.resources?.cpu) || 2
@@ -276,6 +285,7 @@ function buildVirtualMachine(entry, name, owner) {
           labels: { "app.kubernetes.io/name": name },
         },
         spec: {
+          nodeSelector: nodeSelector(),
           domain: {
             cpu: { cores: cpu },
             memory: { guest: mem },
