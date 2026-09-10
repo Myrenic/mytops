@@ -455,13 +455,23 @@ async function handleListWorkspaces(req, res, identity) {
     vmItems = vmList.items ?? []
   } catch { /* KubeVirt not installed yet */ }
 
-  const vmWs = vmItems
+  const vmWs = await Promise.all(vmItems
     .filter((vm) => vm.metadata?.labels?.["chacdn-runtime"]?.startsWith("vm-"))
-    .map((vm) => {
+    .map(async (vm) => {
       const name = vm.metadata.name
       const entryId = name.slice(3, name.length - slug.length - 1)
       const ready = vm.status?.ready ?? false
       const entry = catalog.find((e) => e.id === entryId)
+
+      // Self-heal: VM IngressRoutes created by older API code pointed at the
+      // container backend (services:3000) — fix whenever we see the drift.
+      const irPath = "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name
+      const ir = await kubeFetch("GET", irPath, null, req.headers).catch(() => null)
+      if (ir && ir.spec?.routes?.[0]?.services?.[0]?.name !== name + "-svc") {
+        await kubeFetch("PUT", irPath, buildIngressRoute(name, domain,
+          { svc: { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 } }), req.headers).catch(() => {})
+      }
+
       return {
         id: entryId,
         name: entry?.name ?? entryId,
@@ -472,6 +482,7 @@ async function handleListWorkspaces(req, res, identity) {
         url: vmWorkspaceUrl(name, domain),
       }
     })
+  )
 
   json(res, 200, containerWs.concat(vmWs))
 }
