@@ -545,6 +545,7 @@ const server = createServer(async (req, res) => {
 
   try {
     if (path === "/api/health" && req.method === "GET") return handleHealth(req, res)
+    if (path === "/api/me" && req.method === "GET") return json(res, 200, { email: identity.email, groups: identity.groups })
     if (path === "/api/catalog" && req.method === "GET") return handleCatalog(req, res)
     if (path === "/api/workspaces" && req.method === "GET") return handleListWorkspaces(req, res, identity)
     if (path === "/api/workspaces" && req.method === "POST") return handleCreateWorkspace(req, res, identity)
