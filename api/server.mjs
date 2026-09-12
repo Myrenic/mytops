@@ -57,7 +57,13 @@ function baseDomain(host) {
 // raw incoming headers — passing content-length/host from the browser request
 // makes the fetch hang when the forwarded body size differs.
 async function kubeFetch(method, path, body, reqHeaders) {
-  const headers = { "Content-Type": "application/json" }
+  // PATCH endpoints require a merge-patch content type; everything else is
+  // plain JSON (patch-as-json makes the apiserver answer 415).
+  const headers = {
+    "Content-Type": method === "PATCH"
+      ? "application/strategic-merge-patch+json"
+      : "application/json",
+  }
   for (const key of Object.keys(reqHeaders)) {
     if (key.toLowerCase().startsWith("x-auth-request-")) headers[key] = reqHeaders[key]
   }
