@@ -140,26 +140,28 @@ function Tile({ entry, status, isOpen, onConnect, onRestart, onEnd }: TileProps)
           )}
           {starting ? "Launching…" : isOpen ? "Resume" : "Launch"}
         </Button>
-        {isOpen && (
-          <>
-            <Button
-              size="icon"
-              variant="outline"
-              title="Restart this workspace with a fresh pod"
-              onClick={() => onRestart(entry)}
-            >
-              <RotateCw />
-            </Button>
-            <Button
-              size="icon"
-              variant="destructive"
-              title={armed ? "Click again to end this workspace" : "End workspace"}
-              onClick={end}
-            >
-              {armed ? <X /> : <Square />}
-            </Button>
-          </>
-        )}
+        {/* Always visible: a stuck launch or a half-provisioned VM must be
+            destroyable even when the API has no live session for it. */}
+        <Button
+          size="icon"
+          variant="outline"
+          title={isOpen ? "Restart this workspace with a fresh pod" : "Restart (no running workspace)"}
+          onClick={() => isOpen && onRestart(entry)}
+        >
+          <RotateCw />
+        </Button>
+        <Button
+          size="icon"
+          variant="destructive"
+          title={
+            armed
+              ? "Click again to destroy this workspace"
+              : "Destroy workspace (also cleans up stale resources)"
+          }
+          onClick={end}
+        >
+          {armed ? <X /> : <Square />}
+        </Button>
       </CardFooter>
     </Card>
   )
