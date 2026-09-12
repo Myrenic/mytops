@@ -7,6 +7,7 @@ import {
   Moon,
   RotateCw,
   Sun,
+  Trash2,
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -64,6 +65,13 @@ export function App() {
     !e.groups?.length || e.groups.some((g) => myGroups.has(g))
   const openIds = workspaces.map((w) => w.id)
   const active = workspaces.find((w) => w.id === activeId) ?? null
+  const activeIsVm = useMemo(
+    () =>
+      /vm-/.test(
+        entries.find((e) => e.id === active?.id)?.runtime ?? ""
+      ),
+    [active, entries]
+  )
 
   const teardownAll = async () => {
     try {
@@ -385,17 +393,28 @@ export function App() {
         <div className="ml-auto flex shrink-0 items-center gap-1 pl-2">
           {active && (
             <>
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={() => restart(active)}
-                disabled={restartingId !== null}
-                title="Restart this workspace with a fresh pod"
-              >
-                <RotateCw
-                  className={restartingId === active.id ? "animate-spin" : ""}
-                />
-              </Button>
+              {activeIsVm ? (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={() => restart(active)}
+                  disabled={restartingId !== null}
+                  title="Reboot VM (fresh boot of the same disk)"
+                >
+                  <RotateCw
+                    className={restartingId === active.id ? "animate-spin" : ""}
+                  />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="Destroy this workspace"
+                  onClick={() => endWorkspace(active.id)}
+                >
+                  <Trash2 />
+                </Button>
+              )}
               <a
                 href={active.url}
                 target="_blank"

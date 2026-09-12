@@ -5,7 +5,7 @@ import {
   Play,
   RotateCw,
   Search,
-  Square,
+  Trash2,
   X,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
@@ -169,7 +169,7 @@ function Tile({ entry, status, isOpen, onConnect, onRestart, onEnd }: TileProps)
           }
           onClick={end}
         >
-          {armed ? <X /> : <Square />}
+          {armed ? <X /> : <Trash2 />}
         </Button>
       </CardFooter>
     </Card>
