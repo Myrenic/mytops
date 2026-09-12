@@ -40,7 +40,21 @@ export function App() {
   // Open workspaces (per-user instances) + which one is shown in the frame.
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
-  const [startingId, setStartingId] = useState<string | null>(null)
+  // Keep launches across refreshes: the provisioning POST is in-flight for
+  // minutes. The tile shows Starting until the server list sees the workspace.
+  const [startingId, setStartingId] = useState<string | null>(() =>
+    sessionStorage.getItem("chacdn-starting")
+  )
+  const setStartingPinned = (id: string | null) => {
+    if (id) {
+      sessionStorage.setItem("chacdn-starting", id)
+      sessionStorage.setItem("chacdn-starting-at", String(Date.now()))
+    } else {
+      sessionStorage.removeItem("chacdn-starting")
+      sessionStorage.removeItem("chacdn-starting-at")
+    }
+    setStartingId(id)
+  }
   const [restartingId, setRestartingId] = useState<string | null>(null)
   const [overlay, setOverlay] = useState<OverlayState | null>(null)
   const [statusById, setStatusById] = useState<Record<string, SessionStatus>>(
@@ -144,6 +158,15 @@ export function App() {
         // streamReady is exactly the 502 annoyance we fixed).
         setActiveId(null)
         localStorage.removeItem("chacdn-active")
+        // A launch pinned before a refresh survives and gets dropped once
+        // the server list shows the workspace (or after 10 minutes).
+        const pinned = sessionStorage.getItem("chacdn-starting")
+        const pinnedAt = Number(sessionStorage.getItem("chacdn-starting-at") || 0)
+        if (pinned && (!accessible.some((w) => w.id === pinned) || Date.now() - pinnedAt > 10 * 60 * 1000)) {
+          sessionStorage.removeItem("chacdn-starting")
+          sessionStorage.removeItem("chacdn-starting-at")
+          setStartingId(null)
+        }
       } catch {
         // not fatal: start with an empty top bar
       }
@@ -151,49 +174,38 @@ export function App() {
   }, [me, entries])
 
   // Poll the live status of open workspaces so tiles/tabs reflect reality
-  // (e.g. a pod that died or finished restarting) without a page reload.
-  // Uses the workplace API (server-side source of truth).
+  // (e.g. a pod that died or finished restarting) without a page reload —
+  // AND always, so a page loaded mid-provisioning picks up the workspace.
+  // The server list is the source of truth.
   useEffect(() => {
-    if (!me || workspaces.length === 0) return
+    if (!me) return
     const poll = async () => {
       try {
         const ws = await listWorkspaces()
         const wsById = new Map(ws.map((w) => [w.id, w]))
-        // Update status for existing workspaces
-        setStatusById((prev) => {
-          const next = { ...prev }
-          for (const w of workspaces) {
-            const live = wsById.get(w.id)
-            if (live) {
-              next[w.id] = live.status
-            } else {
-              // Workspace disappeared (terminated externally)
-              delete next[w.id]
-            }
-          }
-          return next
-        })
-        // Drop workspaces that no longer exist
+        // Merge: existing → update status; new → add; ghosts → drop.
         setWorkspaces((prev) => {
-          const alive = prev.filter((w) => wsById.has(w.id))
-          if (alive.length < prev.length) {
-            // Clean up active tab if it was the one that disappeared
+          const dead = prev.filter((w) => !wsById.has(w.id))
+          const added = ws.filter((w) => !prev.some((p) => p.id === w.id))
+          if (dead.length) {
+            // A workspace vanished externally — keep semantics of the old
+            // code: drop ghost tabs.
             setActiveId((prevActive) =>
-              prevActive && !wsById.has(prevActive)
-                ? (alive.at(-1)?.id ?? null)
-                : prevActive
+              prevActive && dead.some((d) => d.id === prevActive) ? null : prevActive
             )
           }
-          return alive
+          if (!dead.length && !added.length) return prev
+          return [...prev.filter((w) => !dead.some((d) => d.id === w.id)), ...added]
         })
+        setStatusById(Object.fromEntries(ws.map((w) => [w.id, w.status])))
       } catch {
         // transient API error; leave status as-is
       }
     }
     poll()
-    const t = setInterval(poll, 15000)
+    const t = setInterval(poll, 5000)
     return () => clearInterval(t)
-  }, [me, workspaces])
+  }, [me])
 
   const select = (id: string | null) => {
     setOverlay(null)
@@ -201,7 +213,7 @@ export function App() {
   }
 
   const connect = async (e: CatalogEntry) => {
-    setStartingId(e.id)
+    setStartingPinned(e.id)
     setError(null)
     const isVm = e.runtime === "vm-linux" || e.runtime === "vm-windows"
     setOverlay({
@@ -223,7 +235,7 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err))
       setOverlay(null)
     } finally {
-      setStartingId(null)
+      setStartingPinned(null)
     }
   }
 
