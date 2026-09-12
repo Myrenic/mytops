@@ -139,22 +139,16 @@ export function App() {
         setStatusById(
           Object.fromEntries(accessible.map((w) => [w.id, w.status]))
         )
-        const last = localStorage.getItem("chacdn-active")
-        setActiveId(
-          last && accessible.some((w) => w.id === last)
-            ? last
-            : (accessible[0]?.id ?? null)
-        )
+        // Land on the dashboard, never auto-open a session. Users get to
+        // pick the machine each time (an auto-opened iframe that isn't
+        // streamReady is exactly the 502 annoyance we fixed).
+        setActiveId(null)
+        localStorage.removeItem("chacdn-active")
       } catch {
         // not fatal: start with an empty top bar
       }
     })()
   }, [me, entries])
-
-  // Remember which tab was active so a refresh lands back on it.
-  useEffect(() => {
-    if (activeId) localStorage.setItem("chacdn-active", activeId)
-  }, [activeId])
 
   // Poll the live status of open workspaces so tiles/tabs reflect reality
   // (e.g. a pod that died or finished restarting) without a page reload.
