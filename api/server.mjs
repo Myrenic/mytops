@@ -626,11 +626,16 @@ async function handleDeleteWorkspace(req, res, identity, entryId) {
   await kubeFetch("DELETE", "/api/v1/namespaces/" + NAMESPACE + "/services/" + name, null, req.headers).catch(() => {})
   await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name, null, req.headers).catch(() => {})
 
-  // Best-effort delete VM resources.
+  // Best-effort delete VM resources. Destroying drops the DISK too (the
+  // user asked for persist-until-destroy semantics): without this the
+  // DataVolume/PVC survive and a re-Launch boots the stale disk (pre-
+  // recipe installs keep coming back).
   await kubeFetch("DELETE", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name, null, req.headers).catch(() => {})
   await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc", null, req.headers).catch(() => {})
   await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit", null, req.headers).catch(() => {})
   await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name, null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes/" + name, null, req.headers).catch(() => {})
+  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/persistentvolumeclaims/" + name, null, req.headers).catch(() => {})
 
   json(res, 200, { ok: true })
 }

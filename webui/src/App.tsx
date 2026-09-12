@@ -201,7 +201,13 @@ export function App() {
   const connect = async (e: CatalogEntry) => {
     setStartingId(e.id)
     setError(null)
-    setOverlay({ title: `Starting ${e.name}…`, detail: "Provisioning workspace resources." })
+    const isVm = e.runtime === "vm-linux" || e.runtime === "vm-windows"
+    setOverlay({
+      title: `Starting ${e.name}…`,
+      detail: isVm
+        ? "Booting VM: disk import, cloud-init, container pull (~2-5 min first time)."
+        : "Pulling image and provisioning container (~30-60 s).",
+    })
     try {
       const ws = await createWorkspace(e.id)
 
@@ -238,9 +244,14 @@ export function App() {
 
   const restart = async (e: Workspace) => {
     setRestartingId(e.id)
+    const isVm = /vm-/.test(
+      entries.find((x) => x.id === e.id)?.runtime ?? ""
+    )
     setOverlay({
       title: `Restarting ${e.name}…`,
-      detail: "This can take a minute.",
+      detail: isVm
+        ? "VM rebooting (~1-3 min: VMI respawn, container restart)."
+        : "Re-pulling image and starting a fresh pod (~30-60 s).",
     })
     try {
       await apiRestartWorkspace(e.id)

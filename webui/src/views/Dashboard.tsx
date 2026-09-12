@@ -123,7 +123,16 @@ function Tile({ entry, status, isOpen, onConnect, onRestart, onEnd }: TileProps)
         </div>
       </CardHeader>
       <CardContent className="flex-1 text-sm text-muted-foreground">
-        {entry.description ?? "Remote workspace."}
+        {starting ? (
+          <span className="flex items-center gap-1.5 text-xs">
+            <Loader2 className="size-3 animate-spin" />
+            {entry.runtime === "vm-linux"
+              ? "Booting VM… (~2-5 min: disk import, cloud-init, container pull)"
+              : "Pulling image + starting container…"}
+          </span>
+        ) : (
+          entry.description ?? "Remote workspace."
+        )}
       </CardContent>
       <CardFooter className="flex gap-2">
         <Button
