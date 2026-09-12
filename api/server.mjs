@@ -466,13 +466,26 @@ async function handleListWorkspaces(req, res, identity) {
           { svc: { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 } }), req.headers).catch(() => {})
       }
 
+      // streamReady: has the VM's web client actually started answering?
+      // VMI Ready only means the guest booted; the webtop container inside
+      // comes up a couple of minutes later. Probe the guest nginx cluster
+      // service so the UI can show "running (connectable)" vs "booting".
+      let streamReady = false
+      try {
+        const r = await fetch("http://" + name + "-svc." + VM_NAMESPACE + ".svc.cluster.local:8080/", {
+          signal: AbortSignal.timeout(1500),
+        })
+        streamReady = r.ok
+      } catch { /* not up yet */ }
+
       return {
         id: entryId,
         name: entry?.name ?? entryId,
         type: entry?.type ?? "desktop",
         runtime: entry?.runtime ?? "vm-linux",
         icon: entry?.icon,
-        status: ready ? "running" : "starting",
+        status: ready && streamReady ? "running" : "starting",
+        streamReady,
         url: vmWorkspaceUrl(name, domain),
       }
     })

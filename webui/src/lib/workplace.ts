@@ -22,6 +22,7 @@ export interface Workspace {
   persistence?: Persistence
   lifecycle?: Lifecycle
   status: "running" | "starting"
+  streamReady?: boolean
   url: string
 }
 

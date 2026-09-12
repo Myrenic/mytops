@@ -69,7 +69,16 @@ function StatusLabel({ status }: { status: SessionStatus }) {
         ? "Starting"
         : "Offline"
   return (
-    <span className="flex items-center gap-2 text-xs text-muted-foreground">
+    <span
+      className="flex items-center gap-2 text-xs text-muted-foreground"
+      title={
+        status === "running"
+          ? "Connected and connectable — click Resume to open"
+          : status === "starting"
+            ? "Provisioning: disk import + cloud-init + container pull, the stream is not reachable yet"
+            : "No workspace for this entry"
+      }
+    >
       <StatusDot status={status} />
       {text}
     </span>

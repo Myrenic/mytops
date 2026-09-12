@@ -474,6 +474,7 @@ export function App() {
           entries={entries.filter(canAccess)}
           openIds={openIds}
           statusById={statusById}
+          streamReadyById={workspaces.reduce((acc, w) => ({ ...acc, [w.id]: w.streamReady }), {})}
           startingId={startingId}
           query={query}
           onQuery={setQuery}
