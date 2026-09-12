@@ -648,7 +648,16 @@ async function handleDeleteWorkspace(req, res, identity, entryId) {
   await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit", null, req.headers).catch(() => {})
   await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name, null, req.headers).catch(() => {})
   await kubeFetch("DELETE", "/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes/" + name, null, req.headers).catch(() => {})
+  // The Longhorn StorageClass retains volumes after PVC delete — capture the
+  // PV name first, then remove the longhorn volume object so no 10Gi ghost
+  // is left behind.
+  const pvc = await kubeFetch("GET", "/api/v1/namespaces/" + VM_NAMESPACE + "/persistentvolumeclaims/" + name, null, req.headers).catch(() => null)
+  const pvName = pvc?.spec?.volumeName
   await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/persistentvolumeclaims/" + name, null, req.headers).catch(() => {})
+  await new Promise((r) => setTimeout(r, 3000))
+  if (pvName) {
+    await kubeFetch("DELETE", "/apis/longhorn.io/v1beta2/namespaces/longhorn-system/volumes/" + pvName, null, req.headers).catch(() => {})
+  }
 
   json(res, 200, { ok: true })
 }

@@ -11,4 +11,5 @@ resources:
   - ./idle-culler-script.yaml
   - ./chacdn-turn.sops.yaml
   - ./coturn.yaml
+  - ./longhorn-rbac.yaml
   - ./chacdn-webui.configmap.json
