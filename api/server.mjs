@@ -682,11 +682,14 @@ async function handleAdminDelete(req, res, identity, target) {
   json(res, 200, { ok: true })
 }
 
-// POST /api/workspaces/:entryId/restart — rolling-restart a workspace.
+// POST /api/workspaces/:entryId/restart — restart a workspace.
+// Containers: rolling-restart the Deployment. VMs: delete the VMI — with
+// runStrategy: Always KubeVirt boots a fresh instance of the same disk.
 async function handleRestartWorkspace(req, res, identity, entryId) {
   const slug = slugFor(identity.email)
   const name = instName(entryId, slug)
   const depPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
+  const vmiPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachineinstances/" + name
 
   const patch = {
     spec: {
@@ -699,16 +702,28 @@ async function handleRestartWorkspace(req, res, identity, entryId) {
   }
 
   const result = await kubeFetch("PATCH", depPath, patch, req.headers)
-  if (result.kind === "Status") {
+
+  if (result.kind === "Status" && result.code === 404) {
+    // Not a container workspace — treat as a VM restart.
+    const vmi = await kubeFetch("GET", vmiPath, null, req.headers)
+    if (vmi.kind === "Status") {
+      return json(res, 404, { error: "workspace not found" })
+    }
+    await kubeFetch("DELETE", vmiPath, null, req.headers)
+  } else if (result.kind === "Status") {
     return json(res, result.code ?? 500, { error: result.message ?? "restart failed" })
   }
 
-  // Wait for readiness.
+  // Wait for readiness (containers) / the VM to disappear+rebootstrap.
   const deadline = Date.now() + 180_000
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 3000))
     const dep = await kubeFetch("GET", depPath, null, req.headers)
     if ((dep.status?.readyReplicas ?? 0) >= 1) {
+      return json(res, 200, { ok: true })
+    }
+    const vmi = await kubeFetch("GET", vmiPath, null, req.headers)
+    if (vmi.status?.ready) {
       return json(res, 200, { ok: true })
     }
   }
