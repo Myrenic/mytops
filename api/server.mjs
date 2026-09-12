@@ -172,51 +172,33 @@ function buildIngressRoute(name, domain, opts) {
 // Shell variables inside the generated cloud-init text must be escaped with
 // a leading extra dollar sign so the Flux postBuild substitution leaves
 // shell-expansion constructs intact for the guest.
-// Selkies desktop stack (original recipe, with verified AU sessions).
-// Selkies desktop stack for VM workspaces — the SAME engine as the
-// linuxserver/webtop containers (baseimage-selkies): xfce on Xvfb, streamed
-// as HTTP/HTTPS websocket through Traefik (Keycloak SSO at the ingress).
-// SELKIES_X_UNIT: startxfce4 wants xinit which we do not install; run the
-// session manager on Xvfb directly instead (verified 먼 treaty).
-const SELKIES_X_UNIT = [
-  "[Unit]",
-  "Description=Xvfb XFCE desktop on :0",
-  "After=network.target",
-  "[Service]",
-  "User=user",
-  "ExecStart=/bin/sh -c \"Xvfb :0 -screen 0 1920x1080x24 -ac & sleep 2; export DISPLAY=:0; exec dbus-run-session -- /usr/bin/xfce4-session\"",
-  "Restart=always",
-  "RestartSec=3",
-  "[Install]",
-  "WantedBy=multi-user.target",
-].join("\n")
+// User-space runtime for VM workspaces — the EXACT linuxserver/webtop container
+// (baseimage-selkies: selkies + pixelflux/pcmflux + Smithay/Labwc wayland + nginx),
+// run with Docker inside the VM. Same image/env as the container desktops, so
+// behavior (scaling, clipboard, chrome) cannot drift from the SPA tiles.
+const WEBTOP_IMAGE = process.env.WEBTOP_IMAGE || "lscr.io/linuxserver/webtop:ubuntu-kde"
+const WEBTOP_ENV = process.env.WEBTOP_ENV || "PIXELFLUX_WAYLAND=true"
 
-// TURN (from the chacdn-turn Secret / coturnDeployment): VMs' masqueraded pod
-// network has no browser-reachable path, so WebRTC ICE goes through coturn.
-const TURN_HOST = process.env.TURN_HOST || ""
-const TURN_PORT = process.env.TURN_PORT || "3478"
-const TURN_PROTOCOL = process.env.TURN_PROTOCOL || "udp"
-const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || ""
-
-const SELKIES_UNIT = [
-  "[Unit]",
-  "Description=Selkies WebRTC Desktop Stream",
-  "Requires=selkies-x.service",
-  "After=selkies-x.service",
-  "[Service]",
-  "User=user",
-  "Environment=DISPLAY=:0",
-  "Environment=PIPEWIRE_LATENCY=128/48000",
-  "Environment=XDG_RUNTIME_DIR=/tmp",
-  "ExecStart=/opt/selkies-gstreamer/bin/selkies-gstreamer-run --addr=0.0.0.0 --port=8080 --enable_https=false --encoder=x264enc --enable_resize=true --enable_basic_auth=false"
-    + (TURN_HOST && TURN_SHARED_SECRET
-      ? " --turn_host=" + TURN_HOST + " --turn_port=" + TURN_PORT + " --turn_protocol=" + TURN_PROTOCOL + " --turn_tls=false --turn_shared_secret=" + TURN_SHARED_SECRET
-      : ""),
-  "Restart=always",
-  "RestartSec=5",
-  "[Install]",
-  "WantedBy=multi-user.target",
-].join("\n")
+function webtopUnit() {
+  return [
+    "[Unit]",
+    "Description=LSIO webtop container desktop",
+    "After=network-online.target docker.service",
+    "Wants=network-online.target docker.service",
+    "Requires=docker.service",
+    "[Service]",
+    "Type=oneshot",
+    "RemainAfterExit=yes",
+    // Pull retries: registry hiccups shouldn't brick a fresh VM boot.
+    "ExecStartPre=-/bin/sh -c 'for i in 1 2 3 4 5; do /usr/bin/docker pull " + WEBTOP_IMAGE + " && break; sleep 20; done'",
+    "ExecStart=/bin/sh -c 'if docker ps --filter name=webtop --filter status=running -q | grep -q .; then exit 0; fi; docker rm -f webtop 2>/dev/null; exec /usr/bin/docker run -d --name webtop --restart unless-stopped --shm-size=1g -p 8080:3000 " + WEBTOP_ENV.split(" ").map((kv) => "-e " + kv).join(" ") + " " + WEBTOP_IMAGE + "'",
+    "TimeoutStartSec=600",
+    "ExecStop=/usr/bin/docker stop webtop",
+    "RemainAfterExit=yes",
+    "[Install]",
+    "WantedBy=multi-user.target",
+  ].join("\n")
+}
 
 function cloudInitUserData() {
   return [
@@ -230,14 +212,10 @@ function cloudInitUserData() {
     "    groups: sudo, ssl-cert",
     // write_files: heredocs inside runcmd break, so files land from here.
     "write_files:",
-    "  - path: /etc/systemd/system/selkies-x.service",
+    "  - path: /etc/systemd/system/webtop.service",
     "    permissions: '0644'",
     "    content: |",
-    "      " + SELKIES_X_UNIT.split("\n").join("\n      "),
-    "  - path: /etc/systemd/system/selkies.service",
-    "    permissions: '0640'",
-    "    content: |",
-    "      " + SELKIES_UNIT.split("\n").join("\n      "),
+    "      " + webtopUnit().split("\n").join("\n      "),
     // Not the packages: block — it does not retry and one transient mirror
     // hiccup killed the entire first boot (verified). Retry the install.
     "runcmd:",
@@ -247,24 +225,21 @@ function cloudInitUserData() {
     "      sleep 10",
     "    done",
     "    for i in 1 2 3; do",
-    "      apt-get install -y -o Acquire::Retries=5 --no-install-recommends xfce4 xfce4-terminal dbus-x11 pulseaudio python3 python3-pip python3-dev jq tar gzip ca-certificates curl build-essential libgcrypt20 libgirepository-1.0-1 glib-networking alsa-utils libpulse0 libopus0 libvpx-dev x264 wmctrl xsel xdotool wayland-protocols libwayland-dev libwayland-egl1 x11-utils x11-xkb-utils x11-xserver-utils xserver-xorg-core xvfb libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 libxv1 libxtst6 libxext6 >/var/log/chacdn-packages.log 2>&1 && break",
+    "      apt-get install -y -o Acquire::Retries=5 ca-certificates curl jq >/var/log/chacdn-packages.log 2>&1 && break",
     "      sleep 30",
     "    done",
-    "  - echo 'xfce4-session' > /home/user/.xsession",
-    "  - chown user:user /home/user/.xsession",
-    // Selkies portable runtime: self-contained gstreamer with WebRTC deps
-    // (asset ~200MB; retry generously; jammy's gstreamer lacks GstWebRTC GIR).
+    // Docker runtime (jammy has docker.io for the engine; kasm apt repos are not needed).
     "  - |",
-    "    for i in 1 2 3 4 5; do",
-    "      curl -fsSL 'https://github.com/selkies-project/selkies-gstreamer/releases/download/v1.6.2/selkies-gstreamer-portable-v1.6.2_amd64.tar.gz' -o /opt/selkies.tar.gz && break",
-    "      sleep 15",
+    "    for i in 1 2 3; do",
+    "      DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=5 docker.io containerd runc >/var/log/chacdn-docker.log 2>&1 && break",
+    "      sleep 30",
     "    done",
-    "    tar -xzf /opt/selkies.tar.gz -C /opt",
-    "    chown -R user:user /opt/selkies-gstreamer",
+    "    systemctl enable --now docker",
+    "  - mkdir -p /home/user/webtop/config && chown -R user:user /home/user/webtop",
+    // VM disk under Longhorn persists /config identical to the containers.
     "  - systemctl daemon-reload",
-    "  - systemctl enable selkies-x selkies",
-    "  - systemctl start selkies-x selkies",
-    "  - systemctl disable --now selkies selkies-x 2>/dev/null || true",
+    "  - systemctl enable webtop.service",
+    "  - systemctl start webtop.service",
   ].join("\n")
 }
 
