@@ -89,6 +89,7 @@ interface TileProps {
   entry: CatalogEntry
   status: SessionStatus
   isOpen: boolean
+  streamReady?: boolean
   onConnect: (e: CatalogEntry) => void
   onRestart: (e: CatalogEntry) => void
   onEnd: (id: string) => void
@@ -190,6 +191,7 @@ interface DashboardProps {
   entries: CatalogEntry[]
   openIds: string[]
   statusById: Record<string, SessionStatus>
+  streamReadyById: Record<string, boolean>
   startingId: string | null
   query: string
   onQuery: (q: string) => void
@@ -204,6 +206,7 @@ export function Dashboard({
   entries,
   openIds,
   statusById,
+  streamReadyById,
   startingId,
   query,
   onQuery,
@@ -243,6 +246,7 @@ export function Dashboard({
               entry={e}
               status={statusOf(e, openIds, statusById, startingId)}
               isOpen={openIds.includes(e.id)}
+              streamReady={streamReadyById?.[e.id]}
               onConnect={onConnect}
               onRestart={onRestart}
               onEnd={onEnd}
