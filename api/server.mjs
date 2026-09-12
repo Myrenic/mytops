@@ -745,7 +745,11 @@ const server = createServer(async (req, res) => {
     if (wsMatch) {
       const entryId = decodeURIComponent(wsMatch[1])
       if (req.method === "DELETE") return handleDeleteWorkspace(req, res, identity, entryId)
-      if (req.method === "POST") return handleRestartWorkspace(req, res, identity, entryId)
+    }
+    // /api/workspaces/:entryId/restart
+    const rsMatch = path.match(/^\/api\/workspaces\/([^/]+)\/restart$/)
+    if (rsMatch && req.method === "POST") {
+      return handleRestartWorkspace(req, res, identity, decodeURIComponent(rsMatch[1]))
     }
 
     // Admin cleanup (ADMIN_GROUPS gate).

@@ -104,7 +104,7 @@ export function createWorkspace(catalogId: string): Promise<Workspace> {
 
 /** Restart a workspace (rolling-restart the Deployment). */
 export function restartWorkspace(catalogId: string): Promise<{ ok: boolean }> {
-  return apiFetch(`/workspaces/${encodeURIComponent(catalogId)}`, {
+  return apiFetch(`/workspaces/${encodeURIComponent(catalogId)}/restart`, {
     method: "POST",
   })
 }
