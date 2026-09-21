@@ -251,14 +251,22 @@ export function FilesView({ owner }: { owner?: string }) {
         )}
 
         {error && (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            {error}
-            {/no home volume/.test(error) && (
-              <span className="block pt-1 text-muted-foreground">
-                A home volume is created the first time you launch an entry with
-                persistence.
-              </span>
-            )}
+          <div className="flex items-start justify-between gap-4 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <span>
+              {error}
+              {/no home volume/.test(error) && (
+                <span className="block pt-1 text-muted-foreground">
+                  A home volume is created the first time you launch an entry
+                  with persistence.
+                </span>
+              )}
+            </span>
+            {/* The API pod rolls like any other workload, and a request that
+                lands mid-roll fails; without this the view stayed broken until
+                you left it and came back. */}
+            <Button size="sm" variant="outline" onClick={() => load(path)}>
+              Try again
+            </Button>
           </div>
         )}
 
