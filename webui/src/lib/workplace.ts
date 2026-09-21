@@ -58,6 +58,23 @@ export interface CatalogEntry {
 export interface Me {
   email: string
   groups: string
+  /** Whether the server considers this caller an admin (it enforces it too). */
+  isAdmin: boolean
+}
+
+/** A workspace as an admin sees it: anyone's, with who owns it. */
+export interface AdminWorkspace {
+  name: string
+  entryId: string
+  entryName: string
+  runtime: "container" | "vm"
+  owner: string
+  ownerEmail: string | null
+  lifecycle: string
+  persistence: string
+  status: SessionStatus
+  lastActiveAt?: number
+  home: { name: string; phase: string; size: string } | null
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -154,6 +171,29 @@ export function restartWorkspace(
 ): Promise<{ ok: boolean; status: SessionStatus }> {
   return apiFetch(`/workspaces/${encodeURIComponent(catalogId)}/restart`, {
     method: "POST",
+  })
+}
+
+/** Admin: every workspace, whoever owns it. */
+export function adminListWorkspaces(): Promise<AdminWorkspace[]> {
+  return apiFetch("/admin/workspaces")
+}
+
+/** Admin: stop or start someone else's workspace (keeps their home volume). */
+export function adminSuspendWorkspace(
+  name: string,
+  suspend: boolean
+): Promise<{ ok: boolean; status: SessionStatus }> {
+  return apiFetch(
+    `/admin/workspaces/${encodeURIComponent(name)}/${suspend ? "suspend" : "resume"}`,
+    { method: "POST" }
+  )
+}
+
+/** Admin: destroy someone else's workspace (their home volume is kept). */
+export function adminDestroyWorkspace(name: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/admin/workspaces/${encodeURIComponent(name)}`, {
+    method: "DELETE",
   })
 }
 

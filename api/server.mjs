@@ -172,7 +172,10 @@ async function kubeFetch(method, path, body, reqHeaders) {
   let parsed = null
   try { parsed = JSON.parse(text) } catch { /* empty body, or HTML from an error page */ }
 
-  if (res.ok) return parsed ?? text
+  // A JSON `null` (or an empty body) means no object came back; hand back an
+  // empty string rather than the literal text, which a caller would have to
+  // remember is falsy-or-not.
+  if (res.ok) return parsed ?? ""
 
   const message = parsed?.message ?? text.slice(0, 300) ?? res.statusText
   if (res.status === 404) return { kind: "Status", code: 404, reason: "NotFound", message }
@@ -253,7 +256,7 @@ function vmWorkspaceStatus(vm, streamReady) {
   return "starting"
 }
 
-function buildDeployment(entry, name, owner) {
+function buildDeployment(entry, name, owner, ownerEmail) {
   const cpuReq = entry.resources?.cpu ?? "250m"
   const memReq = entry.resources?.memory ?? "256Mi"
   const memLim = entry.type === "desktop" ? "4Gi" : "2Gi"
@@ -266,6 +269,10 @@ function buildDeployment(entry, name, owner) {
     metadata: {
       name,
       namespace: NAMESPACE,
+      // The slug cannot be reversed into an email, so record it: the admin view
+      // has to say *who* a workspace belongs to, and admins have to be told
+      // before they destroy someone's work.
+      annotations: ownerEmail ? { "mytops/owner-email": ownerEmail } : undefined,
       labels: {
         "app.kubernetes.io/name": "mytops",
         "app.kubernetes.io/component": "session",
@@ -738,7 +745,7 @@ function nodeSelector() {
   return WORKSPACE_NODE ? { "kubernetes.io/hostname": WORKSPACE_NODE } : {}
 }
 
-function buildVirtualMachine(entry, name, owner) {
+function buildVirtualMachine(entry, name, owner, ownerEmail) {
   const cpu = parseInt(entry.resources?.cpu) || 2
   const mem = entry.resources?.memory || "2Gi"
   const storage = entry.storage || "10Gi"
@@ -748,6 +755,7 @@ function buildVirtualMachine(entry, name, owner) {
     metadata: {
       name: name,
       namespace: VM_NAMESPACE,
+      annotations: ownerEmail ? { "mytops/owner-email": ownerEmail } : undefined,
       labels: {
         "app.kubernetes.io/name": name,
         "mytops-owner": owner,
@@ -852,6 +860,20 @@ function buildCloudInitSecret(name, userData) {
   }
 }
 
+// Has the VM's web client actually started answering? VMI Ready only means the
+// guest booted; the desktop container inside comes up a couple of minutes
+// later, so everything that reports VM state asks this.
+async function guestStreamReady(name) {
+  try {
+    const res = await fetch("http://" + name + "-svc." + VM_NAMESPACE + ".svc.cluster.local:8080/", {
+      signal: AbortSignal.timeout(1500),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 function isVmRuntime(runtime) {
   return runtime && runtime.startsWith("vm-")
 }
@@ -860,6 +882,20 @@ function vmWorkspaceUrl(name, domain) {
   // Same single-level host as containers — the wildcard cert only covers
   // *.tuntelder.com (one level), so no extra "apps." component.
   return "https://" + name + "." + domain
+}
+
+// ── Audit ────────────────────────────────────────────────────────────
+// One JSON line per state-changing action, on stdout, so the cluster's log
+// stack can answer "who destroyed whose desktop" without a database here.
+// Deliberately boring: an audit trail that can fail is worse than none.
+function audit(actor, action, target, detail = "") {
+  console.log("audit: " + JSON.stringify({
+    at: new Date().toISOString(),
+    actor: actor || "unknown",
+    action,
+    target,
+    detail,
+  }))
 }
 
 // ── Idle suspension ──────────────────────────────────────────────────
@@ -895,10 +931,13 @@ function touchActivity(name) {
 }
 
 // Resolve "when was this last used" for a workspace we have no live record of.
+// Anything unparseable means "unknown", which is treated as *now*: failing to
+// date a workspace must never be the reason it gets stopped.
 function lastActiveFrom(obj) {
-  const stamp = obj.metadata.annotations?.[ACTIVITY_ANNOTATION]
-  const parsed = stamp ? Date.parse(stamp) : NaN
-  return Number.isFinite(parsed) ? parsed : Date.parse(obj.metadata.creationTimestamp)
+  const stamp = Date.parse(obj.metadata.annotations?.[ACTIVITY_ANNOTATION] ?? "")
+  if (Number.isFinite(stamp)) return stamp
+  const created = Date.parse(obj.metadata?.creationTimestamp ?? "")
+  return Number.isFinite(created) ? created : Date.now()
 }
 
 function workspaceIsSuspended(runtime, obj) {
@@ -949,7 +988,7 @@ async function suspendIdleWorkspaces() {
       if (!limit) continue
       const last = activity.get(name) ?? lastActiveFrom(obj)
       if (now - last < limit) continue
-      console.log("idle: suspending " + name + " (idle " + Math.round((now - last) / 60_000) + "m, limit " + limit / 60_000 + "m)")
+      audit("system", "idle.suspend", name, "idle " + Math.round((now - last) / 60_000) + "m, limit " + limit / 60_000 + "m")
       await setWorkspaceSuspended(runtime, name, true, {})
         .catch((err) => console.error("idle: could not suspend " + name + ": " + err.message))
     }
@@ -1017,6 +1056,7 @@ async function handleStreamAuth(req, res, identity) {
     return json(res, 200, { ok: true })
   }
 
+  audit(email, "stream.denied", host, "does not own this workspace")
   console.warn("stream-auth: " + email + " denied for " + host)
   json(res, 403, { error: "not your workspace" })
 }
@@ -1101,17 +1141,7 @@ async function handleListWorkspaces(req, res, identity) {
         { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 }, req.headers)
         .catch((err) => console.error("workspace " + name + ": " + err.message))
 
-      // streamReady: has the VM's web client actually started answering?
-      // VMI Ready only means the guest booted; the webtop container inside
-      // comes up a couple of minutes later. Probe the guest nginx cluster
-      // service so the UI can show "starting" until it can actually be used.
-      let streamReady = false
-      try {
-        const r = await fetch("http://" + name + "-svc." + VM_NAMESPACE + ".svc.cluster.local:8080/", {
-          signal: AbortSignal.timeout(1500),
-        })
-        streamReady = r.ok
-      } catch { /* not up yet */ }
+      const streamReady = await guestStreamReady(name)
 
       return {
         id: entryId,
@@ -1151,9 +1181,9 @@ async function handleCreateWorkspace(req, res, identity) {
   const domain = DOMAIN || baseDomain(req.headers.host ?? "")
 
   if (isVmRuntime(entry.runtime)) {
-    return handleCreateVmWorkspace(req, res, entry, name, slug, domain)
+    return handleCreateVmWorkspace(req, res, entry, name, slug, domain, identity)
   }
-  return handleCreateContainerWorkspace(req, res, entry, name, slug, domain)
+  return handleCreateContainerWorkspace(req, res, entry, name, slug, domain, identity)
 }
 
 // ── Container workspace creation ─────────────────────────────────────
@@ -1164,7 +1194,7 @@ async function handleCreateWorkspace(req, res, identity) {
 // Launch hang for minutes behind (and sometimes past) the ingress and browser
 // timeouts, with no way for the client to tell success from a dropped
 // connection.
-async function handleCreateContainerWorkspace(req, res, entry, name, slug, domain) {
+async function handleCreateContainerWorkspace(req, res, entry, name, slug, domain, identity) {
   const depPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
   const existing = await kubeFetch("GET", depPath, null, req.headers)
   if (!isNotFound(existing)) {
@@ -1172,6 +1202,8 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
     // again rather than left as it is.
     if (existing.spec?.replicas === 0) {
       await setWorkspaceSuspended("container", name, false, req.headers)
+      touchActivity(name)
+      audit(identity?.email, "workspace.resume", name)
       return json(res, 200, {
         id: entry.id, name, status: "starting",
         url: "https://" + name + "." + domain,
@@ -1187,7 +1219,9 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
   if (usesHome(entry)) await ensureHome(slug, entry, req.headers)
 
   await kubeFetch("POST", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments",
-    buildDeployment(entry, name, slug), req.headers)
+    buildDeployment(entry, name, slug, identity?.email), req.headers)
+  touchActivity(name)
+  audit(identity?.email, "workspace.create", name, "entry=" + entry.id + " runtime=container")
 
   await ensureService(NAMESPACE, name, () => buildService(name, slug, entry.id), req.headers)
   await ensureIngressRoute(name, domain, { name, namespace: NAMESPACE, port: 3000 }, req.headers)
@@ -1199,7 +1233,7 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
 }
 
 // ── VM workspace creation ────────────────────────────────────────────
-async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
+async function handleCreateVmWorkspace(req, res, entry, name, slug, domain, identity) {
   const vmPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name
   const existing = await kubeFetch("GET", vmPath, null, req.headers)
   if (!isNotFound(existing)) {
@@ -1207,6 +1241,8 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
       { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 }, req.headers)
     if (existing.spec?.runStrategy === "Halted") {
       await setWorkspaceSuspended("vm", name, false, req.headers)
+      touchActivity(name)
+      audit(identity?.email, "workspace.resume", name)
       return json(res, 200, {
         id: entry.id, name, status: "starting",
         url: vmWorkspaceUrl(name, domain),
@@ -1240,7 +1276,9 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
   }
 
   await kubeFetch("POST", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines",
-    buildVirtualMachine(entry, name, slug), req.headers)
+    buildVirtualMachine(entry, name, slug, identity?.email), req.headers)
+  touchActivity(name)
+  audit(identity?.email, "workspace.create", name, "entry=" + entry.id + " runtime=" + (entry.runtime ?? "container"))
 
   await ensureService(VM_NAMESPACE, name + "-svc", () => buildVmService(name), req.headers)
   await ensureIngressRoute(name, domain,
@@ -1257,40 +1295,101 @@ async function handleDeleteWorkspace(req, res, identity, entryId) {
   const name = instName(entryId, slug)
   const failures = await teardownWorkspace(name, req.headers)
   if (failures.length) {
+    audit(identity.email, "workspace.destroy", name, "failed: " + failures[0])
     return json(res, 502, { error: "teardown incomplete: " + failures[0] })
   }
+  audit(identity.email, "workspace.destroy", name, "home volume kept")
   json(res, 200, { ok: true })
 }
 
-// Admin: list ALL workspaces regardless of owner.
+// Admin: list ALL workspaces regardless of owner. This is the admin page's only
+// data source: the browser cannot see other people's workspaces any other way,
+// and every field here (owner, life, last activity, home volume) is something
+// an admin has to consider before acting on someone else's work.
 async function handleAdminList(req, res, identity) {
   if (!isAdmin(identity)) return json(res, 403, { error: "not admin" })
 
-  const sap = await kubeFetch("GET",
-    "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments?labelSelector=app.kubernetes.io/component%3Dsession",
-    null, req.headers)
-  const containers = (sap.items ?? []).map((d) => ({
-    name: d.metadata.name,
-    owner: d.metadata.labels?.["mytops-owner"] ?? "",
-    lifecycle: d.metadata.labels?.["mytops-lifecycle"] ?? "",
-    runtime: "container",
-    ready: (d.status?.readyReplicas ?? 0) >= 1,
+  const [sap, vmsList] = await Promise.all([
+    kubeFetch("GET",
+      "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments?labelSelector=app.kubernetes.io%2Fcomponent%3Dsession",
+      null, req.headers),
+    kubeFetch("GET", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines?labelSelector=mytops-runtime", null, req.headers)
+      .catch(() => ({ items: [] })),
+  ])
+
+  const describe = (runtime, obj) => {
+    const name = obj.metadata.name
+    const slug = obj.metadata.labels?.["mytops-owner"] ?? ""
+    const entryId = name.startsWith("ws-") && slug ? entryIdOf(name, slug) : name
+    const entry = catalog.find((e) => e.id === entryId)
+    return {
+      name,
+      entryId,
+      entryName: entry?.name ?? entryId,
+      runtime,
+      owner: slug,
+      ownerEmail: obj.metadata.annotations?.["mytops/owner-email"] ?? null,
+      lifecycle: obj.metadata.labels?.["mytops-lifecycle"] ?? "",
+      persistence: obj.metadata.labels?.["mytops-persistence"] ?? "",
+      status: runtime === "container" ? containerWorkspaceStatus(obj) : "starting",
+      lastActiveAt: activity.get(name) ?? lastActiveFrom(obj),
+      home: null,
+    }
+  }
+
+  const rows = [
+    ...(sap.items ?? []).map((d) => describe("container", d)),
+    ...(vmsList.items ?? []).map((v) => describe("vm", v)),
+  ]
+
+  // An admin sees the same truth as the owner, so the VM rows get the same
+  // guest probe the owner's list does (a booted guest whose desktop has not
+  // come up is "starting", not "running").
+  await Promise.all(rows.filter((row) => row.runtime === "vm" && row.status === "starting").map(async (row) => {
+    const vm = (vmsList.items ?? []).find((v) => v.metadata?.name === row.name)
+    if (vm) row.status = vmWorkspaceStatus(vm, await guestStreamReady(row.name))
   }))
 
-  const vmPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines"
-  let vms = []
-  try {
-    const vmsList = await kubeFetch("GET", vmPath + "?labelSelector=mytops-runtime", null, req.headers)
-    vms = (vmsList.items ?? []).map((vm) => ({
-      name: vm.metadata.name,
-      owner: vm.metadata.labels?.["mytops-owner"] ?? "",
-      lifecycle: vm.metadata.labels?.["mytops-lifecycle"] ?? "",
-      runtime: "vm",
-      ready: vm.status?.ready ?? false,
-    }))
-  } catch { /* KubeVirt not installed */ }
+  // One home volume per *user*, so look each owner up once no matter how many
+  // workspaces they have.
+  const owners = [...new Set(rows.map((r) => r.owner).filter(Boolean))]
+  const homes = new Map(await Promise.all(owners.map(async (slug) => {
+    const pvc = await kubeFetch("GET", "/api/v1/namespaces/" + NAMESPACE + "/persistentvolumeclaims/" + homeName(slug), null, req.headers)
+      .catch(() => null)
+    return [slug, isNotFound(pvc) ? null : pvc]
+  })))
+  for (const row of rows) {
+    const pvc = homes.get(row.owner)
+    const homeName_ = pvc?.metadata?.name
+    if (homeName_) {
+      row.home = {
+        name: homeName_,
+        phase: pvc.status?.phase ?? "Unknown",
+        size: pvc.spec?.resources?.requests?.storage ?? "",
+      }
+    }
+  }
 
-  json(res, 200, containers.concat(vms))
+  json(res, 200, rows)
+}
+
+// Admin: stop or start someone else's workspace. Same helper the idle sweep
+// uses, so an admin action and an automatic suspension are the same operation.
+async function handleAdminSuspend(req, res, identity, target, suspended) {
+  if (!isAdmin(identity)) return json(res, 403, { error: "not admin" })
+  if (!/^ws-[a-z0-9-]+$/.test(target)) return json(res, 400, { error: "bad workspace name" })
+
+  const dep = await kubeFetch("GET", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + target, null, req.headers)
+  const runtime = isNotFound(dep) ? "vm" : "container"
+  const obj = isNotFound(dep)
+    ? await kubeFetch("GET", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + target, null, req.headers)
+    : dep
+  if (isNotFound(obj)) return json(res, 404, { error: "workspace not found" })
+
+  await setWorkspaceSuspended(runtime, target, suspended, req.headers)
+  audit(identity.email, suspended ? "admin.suspend" : "admin.resume", target,
+    "owner=" + (obj.metadata.labels?.["mytops-owner"] ?? "?"))
+  json(res, 200, { ok: true, status: suspended ? "suspended" : "starting" })
 }
 
 // Admin: destroy a workspace by full object name (ws-<entryId>-<slug>). Same
@@ -1301,8 +1400,10 @@ async function handleAdminDelete(req, res, identity, target) {
 
   const failures = await teardownWorkspace(target, req.headers)
   if (failures.length) {
+    audit(identity.email, "admin.destroy", target, "failed: " + failures[0])
     return json(res, 502, { error: "teardown incomplete: " + failures[0] })
   }
+  audit(identity.email, "admin.destroy", target, "home volume kept")
   json(res, 200, { ok: true })
 }
 
@@ -1391,7 +1492,11 @@ const server = createServer(async (req, res) => {
     if (path === "/api/stream-auth" && req.method === "GET") return await handleStreamAuth(req, res, identity)
     if (!identity.email) return json(res, 401, { error: "unauthenticated" })
 
-    if (path === "/api/me" && req.method === "GET") return json(res, 200, { email: identity.email, groups: identity.groups })
+    if (path === "/api/me" && req.method === "GET") {
+      // isAdmin is for the SPA's benefit (showing the admin tab); every admin
+      // route re-checks it server-side.
+      return json(res, 200, { email: identity.email, groups: identity.groups, isAdmin: isAdmin(identity) })
+    }
     if (path === "/api/catalog" && req.method === "GET") return await handleCatalog(req, res)
     if (path === "/api/workspaces" && req.method === "GET") return await handleListWorkspaces(req, res, identity)
     if (path === "/api/workspaces" && req.method === "POST") return await handleCreateWorkspace(req, res, identity)
@@ -1417,6 +1522,10 @@ const server = createServer(async (req, res) => {
     if (path === "/api/admin/workspaces" && req.method === "GET") return await handleAdminList(req, res, identity)
     const adminMatch = path.match(/^\/api\/admin\/workspaces\/([^/]+)$/)
     if (adminMatch && req.method === "DELETE") return await handleAdminDelete(req, res, identity, decodeURIComponent(adminMatch[1]))
+    const adminAction = path.match(/^\/api\/admin\/workspaces\/([^/]+)\/(suspend|resume)$/)
+    if (adminAction && req.method === "POST") {
+      return await handleAdminSuspend(req, res, identity, decodeURIComponent(adminAction[1]), adminAction[2] === "suspend")
+    }
 
     json(res, 404, { error: "not found" })
   } catch (err) {

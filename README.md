@@ -172,6 +172,17 @@ Two consequences for the API code, both of which it has to respect:
   any user in the realm could open anyone's desktop. The endpoint trusts only
   identity resolved from oauth2-proxy's own headers or from its session cookie -
   never a client-supplied header - and admins pass.
+- **Admins have a page.** `/api/admin/workspaces` (list, everyone's), the
+  `suspend`/`resume` actions and the destroy endpoint all sit behind
+  `ADMIN_GROUPS` (`admin,admins` by default) from the oauth2-proxy group header,
+  and `/api/me` reports `isAdmin` only so the SPA can show the tab - every admin
+  route re-checks it. The page is deliberately blunt about what it does: rows
+  name the owner and their home volume, and destroying someone's workspace says
+  their files are kept (the teardown cannot reach `home-*`).
+  Every state change writes one `audit: {...}` line to stdout (`actor`, `action`,
+  `target`), including the idle sweep's suspensions and denied stream attempts -
+  the cluster's log stack is the store, because an audit trail that can fail to
+  write is worse than none.
 - **Idle workspaces are stopped, not destroyed.** An entry can say how long it
   may sit unused (`idleSuspendMinutes` in `catalog.json`); the API then stops it
   in place - `spec.replicas: 0` for a container, `runStrategy: Halted` for a VM -

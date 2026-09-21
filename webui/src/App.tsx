@@ -6,6 +6,7 @@ import {
   Monitor,
   Moon,
   RotateCw,
+  ShieldCheck,
   Sun,
   Trash2,
   X,
@@ -27,6 +28,7 @@ import {
   type SessionStatus,
   type Workspace,
 } from "@/lib/workplace"
+import { AdminView } from "@/views/AdminView"
 import { Dashboard } from "@/views/Dashboard"
 import { SessionView, type OverlayState } from "@/views/SessionView"
 
@@ -38,6 +40,9 @@ export function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState("")
+  // Only ever "admin" for someone the API calls an admin - and the API checks
+  // again on every admin call.
+  const [view, setView] = useState<"catalog" | "admin">("catalog")
 
   // Open workspaces (per-user instances) + which one is shown in the frame.
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
@@ -214,6 +219,7 @@ export function App() {
   const select = (id: string | null) => {
     setOverlay(null)
     setActiveId(id)
+    if (id) setView("catalog")
   }
 
   const connect = async (e: CatalogEntry) => {
@@ -337,7 +343,10 @@ export function App() {
       <header className="flex h-12 shrink-0 items-center gap-1 border-b bg-card/80 px-2 backdrop-blur">
         <button
           type="button"
-          onClick={() => select(null)}
+          onClick={() => {
+            select(null)
+            setView("catalog")
+          }}
           title="Back to workspace catalog"
           className="flex h-8 shrink-0 items-center gap-2 rounded-md px-2 hover:bg-muted"
         >
@@ -449,6 +458,20 @@ export function App() {
             </>
           )}
 
+          {me?.isAdmin && (
+            <Button
+              size="icon"
+              variant={view === "admin" && !active ? "secondary" : "ghost"}
+              onClick={() => {
+                select(null)
+                setView((v) => (v === "admin" ? "catalog" : "admin"))
+              }}
+              title="Admin: manage everyone's workspaces"
+            >
+              <ShieldCheck className="size-4" />
+            </Button>
+          )}
+
           <Button
             size="icon"
             variant="ghost"
@@ -472,7 +495,9 @@ export function App() {
         </div>
       </header>
 
-      {active ? (
+      {view === "admin" && !active ? (
+        <AdminView />
+      ) : active ? (
         <SessionView
           entry={{ id: active.id, name: active.name }}
           instUrl={active.url}
