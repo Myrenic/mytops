@@ -35,14 +35,15 @@ spec:
               # kubectl, which the alpine image does not ship. It also has
               # /bin/sh, which is all the script needs.
               image: alpine/k8s:1.36.0
-              # The script is base64-encoded in a ConfigMap (binaryData): the
-              # chacdn kustomization postBuild envsubst removes unknown shell
-              # vars from inline text, which previously corrupted the script
-              # body. binaryData is opaque to substitution.
+              # The script lives in the ConfigMap's binaryData (base64), which
+              # is opaque to the chacdn kustomization's postBuild envsubst -
+              # inline text in ConfigMap data had its ${VAR} shell variables
+              # eaten, which is why it is encoded at all. Kubernetes decodes
+              # binaryData when it writes the mounted file, so the container
+              # runs the script straight from the mount.
               command:
                 - /bin/sh
-                - -c
-                - 'base64 -d /etc/cull/cull.sh > /tmp/cull.sh && /bin/sh /tmp/cull.sh'
+                - /etc/cull/cull.sh
               env:
                 - name: MAX_LIFETIME_MINUTES
                   value: "480"
@@ -50,11 +51,6 @@ spec:
                 - name: script
                   mountPath: /etc/cull
                   readOnly: true
-                # readOnlyRootFilesystem is on, so the decoded script needs a
-                # writable place: without this the job died with
-                # "can't create /tmp/cull.sh: Read-only file system" every run.
-                - name: tmp
-                  mountPath: /tmp
               resources:
                 requests:
                   cpu: 5m
@@ -70,5 +66,3 @@ spec:
             - name: script
               configMap:
                 name: chacdn-idle-culler-script
-            - name: tmp
-              emptyDir: {}
