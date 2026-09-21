@@ -524,7 +524,7 @@ function homeKeeperMatches(keeper, slug) {
 // Create the home volume if needed and make sure something holds it attached,
 // then return the NFS source its VM guest should mount (null when the volume
 // never bound, in which case the caller must not pretend it has one).
-async function ensureHome(slug, entry, headers, { waitForBind = false } = {}) {
+async function ensureHome(slug, entry, headers) {
   const pvcPath = "/api/v1/namespaces/" + NAMESPACE + "/persistentvolumeclaims/" + homeName(slug)
   const existing = await kubeFetch("GET", pvcPath, null, headers).catch(() => null)
   if (isNotFound(existing)) {
@@ -546,9 +546,13 @@ async function ensureHome(slug, entry, headers, { waitForBind = false } = {}) {
       buildHomeKeeper(slug), headers)
   }
 
-  if (!waitForBind) return null
+  return null
+}
 
-  // The keeper is the first consumer, so this normally binds within seconds.
+// The NFS source a VM guest needs, once the claim has bound. The keeper is the
+// first consumer, so this normally resolves within seconds.
+async function ensureHomeSource(slug, entry, headers) {
+  const pvcPath = "/api/v1/namespaces/" + NAMESPACE + "/persistentvolumeclaims/" + homeName(slug)
   let pvName = null
   const bound = await waitFor(async () => {
     const pvc = await kubeFetch("GET", pvcPath, null, headers)
@@ -1249,6 +1253,11 @@ async function handleCreateWorkspace(req, res, identity) {
 // timeouts, with no way for the client to tell success from a dropped
 // connection.
 async function handleCreateContainerWorkspace(req, res, entry, name, slug, domain, identity) {
+  // Ensure the home before looking at the workspace: an existing keeper has to
+  // be brought up to date (it grew the file API), and a workspace that is
+  // already running would otherwise skip that.
+  if (usesHome(entry)) await ensureHome(slug, entry, req.headers)
+
   const depPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
   const existing = await kubeFetch("GET", depPath, null, req.headers)
   if (!isNotFound(existing)) {
@@ -1269,9 +1278,6 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
     })
   }
 
-  // The claim must exist before the pod that mounts it.
-  if (usesHome(entry)) await ensureHome(slug, entry, req.headers)
-
   await kubeFetch("POST", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments",
     buildDeployment(entry, name, slug, identity?.email), req.headers)
   touchActivity(name)
@@ -1288,6 +1294,10 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
 
 // ── VM workspace creation ────────────────────────────────────────────
 async function handleCreateVmWorkspace(req, res, entry, name, slug, domain, identity) {
+  // Same as the container path: keep the home and its keeper current even when
+  // the VM already exists.
+  const home = usesHome(entry) ? await ensureHome(slug, entry, req.headers) : null
+
   const vmPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name
   const existing = await kubeFetch("GET", vmPath, null, req.headers)
   if (!isNotFound(existing)) {
@@ -1312,14 +1322,14 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain, iden
   // exists once the claim has bound, so this has to resolve before the
   // cloud-init Secret is written. Failing loudly beats booting a desktop whose
   // profile silently lives on the throwaway root disk.
-  let homeSource = null
-  if (usesHome(entry)) {
-    homeSource = await ensureHome(slug, entry, req.headers, { waitForBind: true })
-    if (!homeSource) {
-      return json(res, 503, {
-        error: "home volume " + homeName(slug) + " did not become ready; try again in a moment",
-      })
-    }
+  // The guest mounts the user's home over NFS and the mount source only exists
+  // once the claim has bound.
+  let homeSource = home
+  if (usesHome(entry) && !homeSource) homeSource = await ensureHomeSource(slug, entry, req.headers)
+  if (usesHome(entry) && !homeSource) {
+    return json(res, 503, {
+      error: "home volume " + homeName(slug) + " did not become ready; try again in a moment",
+    })
   }
 
   const secretPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit"
