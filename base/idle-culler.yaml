@@ -1,10 +1,10 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: chacdn-idle-culler
+  name: shacdn-idle-culler
   namespace: services
   labels:
-    app.kubernetes.io/name: chacdn
+    app.kubernetes.io/name: shacdn
     app.kubernetes.io/component: idle-culler
 spec:
   schedule: "*/10 * * * *"
@@ -18,10 +18,10 @@ spec:
       template:
         metadata:
           labels:
-            app.kubernetes.io/name: chacdn
+            app.kubernetes.io/name: shacdn
             app.kubernetes.io/component: idle-culler
         spec:
-          serviceAccountName: chacdn-control
+          serviceAccountName: shacdn-control
           restartPolicy: Never
           automountServiceAccountToken: true
           securityContext:
@@ -36,7 +36,7 @@ spec:
               # /bin/sh, which is all the script needs.
               image: alpine/k8s:1.36.0
               # The script lives in the ConfigMap's binaryData (base64), which
-              # is opaque to the chacdn kustomization's postBuild envsubst -
+              # is opaque to the shacdn kustomization's postBuild envsubst -
               # inline text in ConfigMap data had its ${VAR} shell variables
               # eaten, which is why it is encoded at all. Kubernetes decodes
               # binaryData when it writes the mounted file, so the container
@@ -65,4 +65,4 @@ spec:
           volumes:
             - name: script
               configMap:
-                name: chacdn-idle-culler-script
+                name: shacdn-idle-culler-script

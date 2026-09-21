@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: chacdn-api-catalog
+  name: shacdn-api-catalog
   namespace: services
 data:
   catalog.json: |

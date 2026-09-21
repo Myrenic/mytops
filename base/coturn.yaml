@@ -6,21 +6,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: chacdn-coturn
+  name: shacdn-coturn
   namespace: services
   labels:
-    app.kubernetes.io/name: chacdn
+    app.kubernetes.io/name: shacdn
     app.kubernetes.io/component: turn
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: chacdn
+      app.kubernetes.io/name: shacdn
       app.kubernetes.io/component: turn
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: chacdn
+        app.kubernetes.io/name: shacdn
         app.kubernetes.io/component: turn
     spec:
       hostNetwork: true
@@ -52,12 +52,12 @@ spec:
             - name: TURN_PORT
               valueFrom:
                 secretKeyRef:
-                  name: chacdn-turn
+                  name: shacdn-turn
                   key: TURN_PORT
             - name: TURN_SHARED_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: chacdn-turn
+                  name: shacdn-turn
                   key: TURN_SHARED_SECRET
           resources:
             requests:

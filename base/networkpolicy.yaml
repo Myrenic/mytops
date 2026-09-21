@@ -6,12 +6,12 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: chacdn-webui
+  name: shacdn-webui
   namespace: services
 spec:
   podSelector:
     matchLabels:
-      app: chacdn-webui
+      app: shacdn-webui
   policyTypes:
     - Ingress
   ingress:

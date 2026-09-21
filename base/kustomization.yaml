@@ -7,10 +7,9 @@ resources:
   - ./control.yaml
   - ./nginx.yaml
   - ./api-catalog.yaml
-  - ./chacdn-workplace-api.configmap.json
+  - ./shacdn-workplace-api.configmap.json
   - ./idle-culler.yaml
   - ./idle-culler-script.yaml
-  - ./chacdn-turn.yaml
+  - ./shacdn-turn.yaml
   - ./coturn.yaml
-  - ./longhorn-rbac.yaml
-  - ./chacdn-webui.configmap.json
+  - ./shacdn-webui.configmap.json

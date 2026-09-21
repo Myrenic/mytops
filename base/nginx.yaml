@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: chacdn-nginx
+  name: shacdn-nginx
   namespace: services
 data:
   default.conf: |
