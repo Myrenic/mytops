@@ -510,16 +510,15 @@ function homeNfsSource(pvName) {
 // plain pod today but grows (it learned to serve the file API), and an existing
 // one would otherwise keep the pod it was created with - the API only ever
 // creates objects, never updates them.
-function homeKeeperMatches(keeper) {
+function homeKeeperMatches(keeper, slug) {
   const have = keeper?.spec?.template?.spec
-  const want = buildHomeKeeper("x").spec.template.spec
+  const want = buildHomeKeeper(slug).spec.template.spec
   const haveContainer = have?.containers?.[0]
   const wantContainer = want.containers[0]
   return !!haveContainer &&
     haveContainer.image === wantContainer.image &&
     JSON.stringify(haveContainer.command) === JSON.stringify(wantContainer.command) &&
-    have?.volumes?.[0]?.persistentVolumeClaim?.claimName ===
-      (keeper?.spec?.template?.spec?.volumes?.[0]?.persistentVolumeClaim?.claimName ?? null)
+    (have.volumes ?? []).some((v) => v.persistentVolumeClaim?.claimName === homeName(slug))
 }
 
 // Create the home volume if needed and make sure something holds it attached,
@@ -535,7 +534,7 @@ async function ensureHome(slug, entry, headers, { waitForBind = false } = {}) {
 
   const keeperPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + homeKeeperName(slug)
   const keeper = await kubeFetch("GET", keeperPath, null, headers).catch(() => null)
-  const keeperStale = !isNotFound(keeper) && keeper?.spec && !homeKeeperMatches(keeper)
+  const keeperStale = !isNotFound(keeper) && keeper?.spec && !homeKeeperMatches(keeper, slug)
   if (isNotFound(keeper) || keeperStale) {
     if (keeperStale) {
       // Recreate rather than patch: the container list is replaced wholesale by

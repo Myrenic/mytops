@@ -106,6 +106,11 @@ console.log(`wrote ${cullOut} (cull.sh, ${Buffer.byteLength(cullScript)} bytes)`
 // ── Home agent ConfigMap (single source of truth: api/home-agent.mjs) ──
 // Mounted into the per-user keeper pod, which is the only thing serving a
 // user's home volume to the file API.
+//
+// binaryData, not data: this source uses template literals, and Flux postBuild
+// runs envsubst over plain ConfigMap values - `$` in the code made it fail with
+// "missing closing brace" and took the whole Kustomization down. The source
+// stays reviewable in the repository; only the shipped copy is encoded.
 const agentSrc = resolve(import.meta.dirname, "../../api/home-agent.mjs")
 const agentCode = await readFile(agentSrc, "utf8")
 const agentOut = join(base, "mytops-home-agent.configmap.json")
@@ -113,7 +118,7 @@ const agentConfigMap = {
   apiVersion: "v1",
   kind: "ConfigMap",
   metadata: { name: "mytops-home-agent" },
-  data: { "home-agent.mjs": agentCode },
+  binaryData: { "home-agent.mjs": Buffer.from(agentCode).toString("base64") },
 }
 await writeFile(agentOut, JSON.stringify(agentConfigMap, null, 2) + "\n")
 console.log(`wrote ${agentOut} (home-agent.mjs, ${Math.round(Buffer.byteLength(agentCode) / 1024)} KiB)`)
