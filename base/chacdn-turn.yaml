@@ -1,13 +1,20 @@
 # TURN endpoint + shared secret for coturn and the workplace API.
 #
-# The values live in the common SOPS bundle (apps/common/cluster-secrets.sops.yaml)
-# and are injected here at build time by the chacdn Kustomization's
-# postBuild.substituteFrom. Nothing secret is stored in this file.
+# The endpoint is ordinary configuration, so it lives here. The shared secret
+# lives in the common SOPS bundle (apps/common/cluster-secrets.sops.yaml) and is
+# injected at build time by the chacdn Kustomization's postBuild.substituteFrom,
+# so the value never touches git.
 #
-# This file used to be named .sops.yaml while holding a plaintext secret; it was
-# never actually encrypted, which is exactly how that leaked. Keep the
-# `${VAR}` placeholders and let CI (sops audit job) reject any *.sops.yaml
-# without a sops block.
+# Keep the secret non-numeric looking (it is generated as hex, see below). Flux
+# substitutes into the built YAML *before* it is parsed, and kustomize drops the
+# quotes around a placeholder that is the whole scalar - so an all-digit value
+# would be applied as an integer and the API server rejects it:
+#     .stringData.TURN_PORT: expected string, got 3478
+# Numeric-looking settings therefore stay literal here, and rotation must keep
+# the secret hex (openssl rand -hex 32).
+#
+# This file used to be named .sops.yaml while holding the plaintext secret; it
+# was never encrypted. CI now rejects any *.sops.yaml without a sops block.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -18,7 +25,8 @@ metadata:
     app.kubernetes.io/component: turn
 type: Opaque
 stringData:
-  TURN_HOST: "${TURN_HOST}"
-  TURN_PORT: "${TURN_PORT}"
-  TURN_PROTOCOL: "${TURN_PROTOCOL}"
+  # coturn runs hostNetwork on this node, the browser reaches it directly.
+  TURN_HOST: "10.0.50.116"
+  TURN_PORT: "3478"
+  TURN_PROTOCOL: "udp"
   TURN_SHARED_SECRET: "${TURN_SHARED_SECRET}"
