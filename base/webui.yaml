@@ -101,7 +101,11 @@ spec:
         # ServiceAccount) so the workplace-api can provision workspace pods.
         - name: kubectl-proxy
           image: alpine/k8s:1.36.0
-          command: ["kubectl", "proxy", "--port=8001", "--address=0.0.0.0", "--disable-filter=true"]
+          # Loopback only. The workplace-api container shares this pod's network
+          # namespace, so it still reaches 127.0.0.1:8001, but no other pod in
+          # the cluster can. --disable-filter is not needed for plain API calls
+          # and must stay off: it disables the proxy's request filter.
+          command: ["kubectl", "proxy", "--port=8001", "--address=127.0.0.1"]
           ports:
             - name: api
               containerPort: 8001

@@ -1,0 +1,24 @@
+# The webui pod holds a ServiceAccount that can create/delete workspace
+# Deployments, Services, IngressRoutes and Longhorn volumes, and its
+# kubectl-proxy listens on 8001. That port is bound to loopback, but a
+# namespace-wide policy keeps the pod reachable only through Traefik so a
+# compromised pod in this cluster cannot even probe it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chacdn-webui
+  namespace: services
+spec:
+  podSelector:
+    matchLabels:
+      app: chacdn-webui
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: network
+      ports:
+        - port: 80
+          protocol: TCP

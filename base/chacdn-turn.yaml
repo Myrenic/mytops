@@ -1,0 +1,24 @@
+# TURN endpoint + shared secret for coturn and the workplace API.
+#
+# The values live in the common SOPS bundle (apps/common/cluster-secrets.sops.yaml)
+# and are injected here at build time by the chacdn Kustomization's
+# postBuild.substituteFrom. Nothing secret is stored in this file.
+#
+# This file used to be named .sops.yaml while holding a plaintext secret; it was
+# never actually encrypted, which is exactly how that leaked. Keep the
+# `${VAR}` placeholders and let CI (sops audit job) reject any *.sops.yaml
+# without a sops block.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: chacdn-turn
+  namespace: services
+  labels:
+    app.kubernetes.io/name: chacdn
+    app.kubernetes.io/component: turn
+type: Opaque
+stringData:
+  TURN_HOST: "${TURN_HOST}"
+  TURN_PORT: "${TURN_PORT}"
+  TURN_PROTOCOL: "${TURN_PROTOCOL}"
+  TURN_SHARED_SECRET: "${TURN_SHARED_SECRET}"
