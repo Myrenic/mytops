@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import {
   deleteFile,
   fileContentUrl,
@@ -57,6 +58,10 @@ export function FilesView({ owner }: { owner?: string }) {
   const [busy, setBusy] = useState(false)
   const [preview, setPreview] = useState<{ entry: FileEntry; text?: string } | null>(null)
   const [armed, setArmed] = useState<string | null>(null)
+  // Inline naming instead of window.prompt: a modal prompt blocks the page (and
+  // any automation) and cannot be styled or cancelled with Escape.
+  const [naming, setNaming] = useState<{ kind: "folder" | "rename"; from?: string } | null>(null)
+  const [name, setName] = useState("")
   const fileInput = useRef<HTMLInputElement>(null)
 
   const load = async (dir: string) => {
@@ -119,29 +124,30 @@ export function FilesView({ owner }: { owner?: string }) {
     }
   }
 
-  const newFolder = async () => {
-    const name = window.prompt("New folder name")
-    if (!name) return
-    const child = path === "/" ? `/${name}` : `${path}/${name}`
+  const submitName = async () => {
+    const wanted = name.trim()
+    const pending = naming
+    setNaming(null)
+    setName("")
+    if (!wanted || !pending) return
+    const join = (n: string) => (path === "/" ? `/${n}` : `${path}/${n}`)
     try {
-      await makeDirectory(child, target)
+      if (pending.kind === "folder") await makeDirectory(join(wanted), target)
+      else await moveFile(join(pending.from ?? ""), join(wanted), target)
       await load(path)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
   }
 
-  const rename = async (entry: FileEntry) => {
-    const name = window.prompt("Rename to", entry.name)
-    if (!name || name === entry.name) return
-    const from = path === "/" ? `/${entry.name}` : `${path}/${entry.name}`
-    const to = path === "/" ? `/${name}` : `${path}/${name}`
-    try {
-      await moveFile(from, to, target)
-      await load(path)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
+  const newFolder = () => {
+    setName("")
+    setNaming({ kind: "folder" })
+  }
+
+  const rename = (entry: FileEntry) => {
+    setName(entry.name)
+    setNaming({ kind: "rename", from: entry.name })
   }
 
   const remove = async (entry: FileEntry) => {
@@ -205,6 +211,44 @@ export function FilesView({ owner }: { owner?: string }) {
             </Button>
           </div>
         </div>
+
+        {naming && (
+          <form
+            className="flex items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              submitName()
+            }}
+          >
+            <Input
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setNaming(null)
+                  setName("")
+                }
+              }}
+              placeholder={naming.kind === "folder" ? "New folder name" : "New name"}
+              className="max-w-xs"
+            />
+            <Button size="sm" type="submit">
+              {naming.kind === "folder" ? "Create folder" : "Rename"}
+            </Button>
+            <Button
+              size="sm"
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setNaming(null)
+                setName("")
+              }}
+            >
+              Cancel
+            </Button>
+          </form>
+        )}
 
         {error && (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
