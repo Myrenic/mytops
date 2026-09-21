@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
   ExternalLink,
+  FolderOpen,
   LogOut,
   Maximize,
   Monitor,
@@ -29,6 +30,7 @@ import {
   type Workspace,
 } from "@/lib/workplace"
 import { AdminView } from "@/views/AdminView"
+import { FilesView } from "@/views/FilesView"
 import { Dashboard } from "@/views/Dashboard"
 import { SessionView, type OverlayState } from "@/views/SessionView"
 
@@ -42,7 +44,9 @@ export function App() {
   const [query, setQuery] = useState("")
   // Only ever "admin" for someone the API calls an admin - and the API checks
   // again on every admin call.
-  const [view, setView] = useState<"catalog" | "admin">("catalog")
+  const [view, setView] = useState<"catalog" | "admin" | "files">("catalog")
+  // Whose home the file view is showing; empty = the signed-in user's own.
+  const [filesOwner, setFilesOwner] = useState<string>("")
 
   // Open workspaces (per-user instances) + which one is shown in the frame.
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
@@ -458,6 +462,20 @@ export function App() {
             </>
           )}
 
+          <Button
+            size="icon"
+            variant={view === "files" && !active ? "secondary" : "ghost"}
+            onClick={() => {
+              select(null)
+              if (view === "files") return setView("catalog")
+              setFilesOwner("")
+              setView("files")
+            }}
+            title="Your files: browse the home volume without a session"
+          >
+            <FolderOpen className="size-4" />
+          </Button>
+
           {me?.isAdmin && (
             <Button
               size="icon"
@@ -495,8 +513,15 @@ export function App() {
         </div>
       </header>
 
-      {view === "admin" && !active ? (
-        <AdminView />
+      {view === "files" && !active ? (
+        <FilesView owner={filesOwner || undefined} />
+      ) : view === "admin" && !active ? (
+        <AdminView
+          onOpenFiles={(owner) => {
+            setFilesOwner(owner)
+            setView("files")
+          }}
+        />
       ) : active ? (
         <SessionView
           entry={{ id: active.id, name: active.name }}

@@ -172,6 +172,19 @@ Two consequences for the API code, both of which it has to respect:
   any user in the realm could open anyone's desktop. The endpoint trusts only
   identity resolved from oauth2-proxy's own headers or from its session cookie -
   never a client-supplied header - and admins pass.
+- **Files are reachable without a session.** Each user's keeper pod runs the
+  home agent (`api/home-agent.mjs`, `mytops-home-agent` ConfigMap): it mounts
+  only that user's volume and serves list/read/write/mkdir/move/delete over
+  HTTP. It has no Service and no DNS name - the workplace API resolves the pod
+  by label and proxies to its IP, after mapping the caller to a user, and a
+  NetworkPolicy admits the webui pod alone. uploads and downloads stream
+  through; paths are normalised into the volume and symlinks out of it are
+  refused. Admins can pass `?owner=<slug>` (audited, and the UI keeps it
+  read-only). The agent runs as root for one reason: a brand-new Longhorn
+  volume is root-owned and every desktop in this system is uid 1000, so it
+  hands the root over on first start. It mounts nothing else, takes no service
+  account token, drops all capabilities and runs with a read-only root
+  filesystem.
 - **Admins have a page.** `/api/admin/workspaces` (list, everyone's), the
   `suspend`/`resume` actions and the destroy endpoint all sit behind
   `ADMIN_GROUPS` (`admin,admins` by default) from the oauth2-proxy group header,

@@ -71,6 +71,14 @@ opening a stream counts too. Entries without the field are never suspended:
 something you leave computing is not idle just because nobody is watching it.
 The catalog sets 60 minutes for the desktops and 30 for the throwaway browser.
 
+### Files
+
+The **Files** button (everyone has one) browses the same home volume the
+workspaces mount: list, upload, download, rename, delete, new folder, plus a
+text/image preview. It talks to `/api/files/…`, which proxies to the per-user
+home agent described in the root README, so it works with no workspace running.
+An admin opening a row's **Files** gets that user's home read-only in the UI.
+
 ## Local dev
 
 ```bash

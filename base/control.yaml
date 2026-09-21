@@ -29,6 +29,12 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create"]
+  # Finding the per-user home agent pod that serves the file API: the keeper
+  # pods have no Service (they are reachable by the API alone), so the API
+  # resolves them by label and talks to the pod IP.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

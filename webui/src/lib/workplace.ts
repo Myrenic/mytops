@@ -174,6 +174,99 @@ export function restartWorkspace(
   })
 }
 
+export interface FileEntry {
+  name: string
+  kind: "file" | "dir" | "link"
+  size: number
+  mtime: number
+  mode?: number
+}
+
+export interface FileListing {
+  path: string
+  entries: FileEntry[]
+}
+
+export interface FileUsage {
+  totalBytes: number
+  freeBytes: number
+}
+
+/** Where a file API call should go: your own home, or (admins) someone's. */
+export type FileTarget = { owner?: string }
+
+function fileQuery(target: FileTarget, extra: Record<string, string> = {}) {
+  const params = new URLSearchParams(extra)
+  if (target.owner) params.set("owner", target.owner)
+  return params.toString()
+}
+
+export function listFiles(path: string, target: FileTarget = {}): Promise<FileListing> {
+  return apiFetch(`/files/list?${fileQuery(target, { path })}`)
+}
+
+export function fileUsage(target: FileTarget = {}): Promise<FileUsage> {
+  return apiFetch(`/files/usage?${fileQuery(target)}`)
+}
+
+/** URL for a download link; `inline` previews instead of downloading. */
+export function fileContentUrl(
+  path: string,
+  target: FileTarget = {},
+  inline = false
+): string {
+  const query = fileQuery(target, { path, ...(inline ? { inline: "1" } : {}) })
+  return `${API}/files/content?${query}`
+}
+
+export async function writeFile(
+  path: string,
+  body: Blob | string,
+  target: FileTarget = {}
+): Promise<{ ok: boolean; size: number }> {
+  const res = await fetch(`${API}/files/content?${fileQuery(target, { path })}`, {
+    method: "PUT",
+    body,
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    let message = `HTTP ${res.status}`
+    try {
+      message = JSON.parse(text).error ?? message
+    } catch {
+      /* not json */
+    }
+    throw new ApiError(message, res.status)
+  }
+  return res.json()
+}
+
+export function makeDirectory(
+  path: string,
+  target: FileTarget = {}
+): Promise<{ ok: boolean }> {
+  return apiFetch(`/files/dir?${fileQuery(target, { path })}`, { method: "POST" })
+}
+
+export function moveFile(
+  from: string,
+  to: string,
+  target: FileTarget = {}
+): Promise<{ ok: boolean }> {
+  return apiFetch(`/files/move?${fileQuery(target, { from, to })}`, {
+    method: "POST",
+  })
+}
+
+export function deleteFile(
+  path: string,
+  target: FileTarget = {}
+): Promise<{ ok: boolean }> {
+  return apiFetch(`/files/entry?${fileQuery(target, { path })}`, {
+    method: "DELETE",
+  })
+}
+
 /** Admin: every workspace, whoever owns it. */
 export function adminListWorkspaces(): Promise<AdminWorkspace[]> {
   return apiFetch("/admin/workspaces")

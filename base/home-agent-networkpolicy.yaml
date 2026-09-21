@@ -1,0 +1,24 @@
+# The home agents hold a user's files and are reachable by pod IP alone (no
+# Service, no DNS name), so the only thing that should ever connect to one is
+# the workplace API running in the webui pod. This keeps a compromised pod
+# elsewhere in the cluster from reading homes it has no business reading -
+# especially the ones belonging to users who are not on that node.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mytops-home-agents
+  namespace: services
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: home-keeper
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mytops-webui
+      ports:
+        - port: 8080
+          protocol: TCP

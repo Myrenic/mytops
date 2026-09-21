@@ -26,7 +26,10 @@ const HOME_STORAGE = process.env.HOME_STORAGE || "20Gi"
 const HOME_PREFIX = "home-"
 // The volume only attaches while something consumes it, and a VM guest mounts
 // it over NFS without being a Kubernetes consumer - so a keeper pod holds it.
-const KEEPER_IMAGE = process.env.KEEPER_IMAGE || "docker.io/library/alpine:3.20"
+// That pod also runs the home agent, which is what lets the SPA browse the home
+// without starting a desktop.
+const KEEPER_IMAGE = process.env.KEEPER_IMAGE || "docker.io/library/node:22-alpine"
+const HOME_AGENT_CONFIGMAP = "mytops-home-agent"
 // Where the guest mounts the export, and what the in-VM desktop gets as /config.
 const GUEST_HOME_PATH = "/home/user/webtop-config"
 // oauth2-proxy's auth endpoint, for the one caller that cannot present the
@@ -453,19 +456,43 @@ function buildHomeKeeper(slug) {
         spec: {
           automountServiceAccountToken: false,
           nodeSelector: nodeSelector(),
-          securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: "RuntimeDefault" } },
+          securityContext: { seccompProfile: { type: "RuntimeDefault" } },
           containers: [
             {
               name: "keeper",
               image: KEEPER_IMAGE,
-              command: ["sleep", "infinity"],
-              volumeMounts: [{ name: "home", mountPath: "/home" }],
-              readinessProbe: { exec: { command: ["sh", "-c", "test -d /home"] }, periodSeconds: 30 },
-              resources: { requests: { cpu: "5m", memory: "16Mi" }, limits: { memory: "64Mi" } },
-              securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } },
+              command: ["node", "/etc/mytops-agent/home-agent.mjs"],
+              ports: [{ name: "files", containerPort: FILES_AGENT_PORT }],
+              env: [
+                { name: "HOME_ROOT", value: "/home" },
+                { name: "AGENT_PORT", value: String(FILES_AGENT_PORT) },
+              ],
+              volumeMounts: [
+                { name: "home", mountPath: "/home" },
+                { name: "agent", mountPath: "/etc/mytops-agent", readOnly: true },
+                { name: "tmp", mountPath: "/tmp" },
+              ],
+              // /healthz is the agent's own liveness; the file API is not
+              // "ready" until the volume is mounted, which it is by then.
+              readinessProbe: { httpGet: { path: "/healthz", port: "files" }, initialDelaySeconds: 2, periodSeconds: 10 },
+              resources: { requests: { cpu: "10m", memory: "32Mi" }, limits: { memory: "192Mi" } },
+              securityContext: {
+                // Runs as root for one reason: a brand-new Longhorn volume is
+                // root-owned, and the agent has to hand the home root to the
+                // desktop user (1000) before it can write there. No service
+                // account token, no capabilities, read-only root filesystem -
+                // this process can only reach the one volume it exists for.
+                allowPrivilegeEscalation: false,
+                capabilities: { drop: ["ALL"] },
+                readOnlyRootFilesystem: true,
+              },
             },
           ],
-          volumes: [{ name: "home", persistentVolumeClaim: { claimName: homeName(slug) } }],
+          volumes: [
+            { name: "home", persistentVolumeClaim: { claimName: homeName(slug) } },
+            { name: "agent", configMap: { name: HOME_AGENT_CONFIGMAP } },
+            { name: "tmp", emptyDir: {} },
+          ],
         },
       },
     },
@@ -477,6 +504,22 @@ function buildHomeKeeper(slug) {
 // the claim has bound.
 function homeNfsSource(pvName) {
   return pvName + "." + LONGHORN_NAMESPACE + ".svc.cluster.local:/" + pvName
+}
+
+// Does the running keeper match what we would create today? The keeper is a
+// plain pod today but grows (it learned to serve the file API), and an existing
+// one would otherwise keep the pod it was created with - the API only ever
+// creates objects, never updates them.
+function homeKeeperMatches(keeper) {
+  const have = keeper?.spec?.template?.spec
+  const want = buildHomeKeeper("x").spec.template.spec
+  const haveContainer = have?.containers?.[0]
+  const wantContainer = want.containers[0]
+  return !!haveContainer &&
+    haveContainer.image === wantContainer.image &&
+    JSON.stringify(haveContainer.command) === JSON.stringify(wantContainer.command) &&
+    have?.volumes?.[0]?.persistentVolumeClaim?.claimName ===
+      (keeper?.spec?.template?.spec?.volumes?.[0]?.persistentVolumeClaim?.claimName ?? null)
 }
 
 // Create the home volume if needed and make sure something holds it attached,
@@ -492,7 +535,14 @@ async function ensureHome(slug, entry, headers, { waitForBind = false } = {}) {
 
   const keeperPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + homeKeeperName(slug)
   const keeper = await kubeFetch("GET", keeperPath, null, headers).catch(() => null)
-  if (isNotFound(keeper)) {
+  const keeperStale = !isNotFound(keeper) && keeper?.spec && !homeKeeperMatches(keeper)
+  if (isNotFound(keeper) || keeperStale) {
+    if (keeperStale) {
+      // Recreate rather than patch: the container list is replaced wholesale by
+      // a merge patch anyway, and a fresh object cannot half-apply.
+      await kubeFetch("DELETE", keeperPath, null, headers)
+        .catch((err) => console.error("home keeper replace: " + err.message))
+    }
     await kubeFetch("POST", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments",
       buildHomeKeeper(slug), headers)
   }
@@ -1461,6 +1511,89 @@ async function handleRestartWorkspace(req, res, identity, entryId) {
   json(res, 200, { ok: true, status: "starting" })
 }
 
+// ── Files ────────────────────────────────────────────────────────────
+//
+// The files live in the user's home volume, which is mounted by that user's
+// keeper pod. That pod runs the home agent (see api/home-agent.mjs) and is the
+// only thing that can touch the volume without starting a desktop; the API
+// resolves the caller to a user, finds their agent, and proxies. Nothing is
+// buffered: uploads and downloads stream through.
+//
+// Admins may pass ?owner=<slug> to reach someone else's files; that path is
+// audited, and the UI keeps it read-only.
+const FILES_AGENT_PORT = Number(process.env.FILES_AGENT_PORT) || 8080
+
+// path on this API -> path on the agent
+const FILE_ROUTES = [
+  { match: /^\/api\/files\/list$/, method: "GET", agent: "/fs/list" },
+  { match: /^\/api\/files\/usage$/, method: "GET", agent: "/fs/usage" },
+  { match: /^\/api\/files\/content$/, method: "GET", agent: "/fs/file" },
+  { match: /^\/api\/files\/content$/, method: "PUT", agent: "/fs/file" },
+  { match: /^\/api\/files\/dir$/, method: "POST", agent: "/fs/dir" },
+  { match: /^\/api\/files\/move$/, method: "POST", agent: "/fs/move" },
+  { match: /^\/api\/files\/entry$/, method: "DELETE", agent: "/fs" },
+]
+const FILE_MUTATIONS = new Set(["/fs/file", "/fs/dir", "/fs/move", "/fs"])
+
+async function homeAgentUrl(slug, headers) {
+  const selector = encodeURIComponent("app.kubernetes.io/component=home-keeper,mytops-owner=" + slug)
+  const pods = await kubeFetch("GET", "/api/v1/namespaces/" + NAMESPACE + "/pods?labelSelector=" + selector, null, headers)
+  const pod = (pods.items ?? []).find((p) => p.status?.podIP && !p.metadata?.deletionTimestamp)
+  return pod ? "http://" + pod.status.podIP + ":" + FILES_AGENT_PORT : null
+}
+
+async function handleFiles(req, res, identity, url) {
+  const route = FILE_ROUTES.find((r) => r.method === req.method && r.match.test(url.pathname))
+  if (!route) return json(res, 404, { error: "not found" })
+
+  const target = url.searchParams.get("owner")
+  const admin = isAdmin(identity)
+  if (target && !admin) return json(res, 403, { error: "not admin" })
+  const slug = target ?? slugFor(identity.email)
+
+  const agent = await homeAgentUrl(slug, req.headers)
+  if (!agent) {
+    return json(res, 404, {
+      error: target
+        ? "that user has no home volume"
+        : "no home volume yet - start a persistent workspace first",
+    })
+  }
+
+  const params = new URLSearchParams(url.search)
+  params.delete("owner")
+  if (FILE_MUTATIONS.has(route.agent)) {
+    audit(identity.email, "files." + (route.agent === "/fs" ? "delete" : route.agent.slice(4)), slug,
+      (params.get("path") ?? params.get("to") ?? "") + (target ? " (admin)" : ""))
+  } else if (target) {
+    audit(identity.email, "files.read", slug, params.get("path") ?? "/")
+  }
+
+  let upstream
+  try {
+    upstream = await fetch(agent + route.agent + "?" + params.toString(), {
+      method: req.method,
+      headers: { "content-type": req.headers["content-type"] ?? "application/octet-stream" },
+      // req is a stream and the agent streams to disk, so a big upload is never
+      // held in memory here either.
+      body: req.method === "GET" || req.method === "DELETE" ? undefined : req,
+      duplex: "half",
+    })
+  } catch (err) {
+    return json(res, 502, { error: "home agent unreachable: " + err.message })
+  }
+
+  const headers = {}
+  for (const key of ["content-type", "content-length", "content-disposition", "last-modified"]) {
+    const value = upstream.headers.get(key)
+    if (value) headers[key] = value
+  }
+  res.writeHead(upstream.status, headers)
+  if (!upstream.body) return res.end()
+  for await (const chunk of upstream.body) res.write(chunk)
+  res.end()
+}
+
 // ── Router ───────────────────────────────────────────────────────────
 const server = createServer(async (req, res) => {
   // CORS for local dev (vite :5173).
@@ -1503,6 +1636,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { email: identity.email, groups: identity.groups, isAdmin: isAdmin(identity) })
     }
     if (path === "/api/catalog" && req.method === "GET") return await handleCatalog(req, res)
+    if (path.startsWith("/api/files/")) return await handleFiles(req, res, identity, url)
     if (path === "/api/workspaces" && req.method === "GET") return await handleListWorkspaces(req, res, identity)
     if (path === "/api/workspaces" && req.method === "POST") return await handleCreateWorkspace(req, res, identity)
 

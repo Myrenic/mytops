@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Loader2, Pause, Play, RefreshCw, Trash2, X } from "lucide-react"
+import { FolderOpen, Loader2, Pause, Play, RefreshCw, Trash2, X } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -35,7 +35,7 @@ const STATUS_STYLE: Record<string, string> = {
  * user's home volume out of every path that starts here, so "Destroy" throws
  * away a running desktop but never their files.
  */
-export function AdminView() {
+export function AdminView({ onOpenFiles }: { onOpenFiles: (owner: string) => void }) {
   const [rows, setRows] = useState<AdminWorkspace[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -185,6 +185,15 @@ export function AdminView() {
                         Suspend
                       </Button>
                     )}
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      title={`Browse ${owner}'s home volume`}
+                      onClick={() => onOpenFiles(w.owner)}
+                    >
+                      <FolderOpen className="mr-1 size-3" />
+                      Files
+                    </Button>
                     <Button
                       size="xs"
                       variant="destructive"

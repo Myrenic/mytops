@@ -103,6 +103,21 @@ const cullConfigMap = {
 await writeFile(cullOut, JSON.stringify(cullConfigMap, null, 2) + "\n")
 console.log(`wrote ${cullOut} (cull.sh, ${Buffer.byteLength(cullScript)} bytes)`)
 
+// ── Home agent ConfigMap (single source of truth: api/home-agent.mjs) ──
+// Mounted into the per-user keeper pod, which is the only thing serving a
+// user's home volume to the file API.
+const agentSrc = resolve(import.meta.dirname, "../../api/home-agent.mjs")
+const agentCode = await readFile(agentSrc, "utf8")
+const agentOut = join(base, "mytops-home-agent.configmap.json")
+const agentConfigMap = {
+  apiVersion: "v1",
+  kind: "ConfigMap",
+  metadata: { name: "mytops-home-agent" },
+  data: { "home-agent.mjs": agentCode },
+}
+await writeFile(agentOut, JSON.stringify(agentConfigMap, null, 2) + "\n")
+console.log(`wrote ${agentOut} (home-agent.mjs, ${Math.round(Buffer.byteLength(agentCode) / 1024)} KiB)`)
+
 // ── Catalog ConfigMap (single source of truth: public/catalog.json) ───
 // The API validates every launch against this catalog (including the group
 // ACL) and serves it to the SPA, so it has to be the same list the SPA ships.
