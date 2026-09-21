@@ -19,13 +19,16 @@ rules:
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
   - apiGroups: [""]
     resources: ["services"]
-    verbs: ["get", "list", "create", "delete"]
+    # watch: the idle culler deletes Services with kubectl, which watches the
+    # object to confirm the delete; without it the culler's log fills up with
+    # "cannot watch resource" errors that look like permission failures.
+    verbs: ["get", "list", "watch", "create", "delete"]
   # The per-user home volume, one per user, plus the keeper deployment that
   # holds it attached so a VM guest can mount its NFS export. Deliberately no
   # "delete": nothing in the API is allowed to throw a user's data away.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "watch", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
