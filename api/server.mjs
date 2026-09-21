@@ -643,8 +643,12 @@ function webtopUnit({ homeMount = false } = {}) {
     // Pull retries: registry hiccups shouldn't brick a fresh VM boot.
     "ExecStartPre=-/bin/sh -c 'for i in 1 2 3 4 5; do /usr/bin/docker pull " + WEBTOP_IMAGE + " && break; sleep 20; done'",
     "ExecStart=/bin/sh -c '" +
+      // No single quotes in here: the whole script is already inside the
+      // ExecStart='...' quoting, and a nested quote ends the string early -
+      // systemd then hands /bin/sh a truncated script (this exact bug made the
+      // unit die with "Syntax error: end of file unexpected").
       (homeMount
-        ? "mountpoint -q " + GUEST_HOME_PATH + " || { echo 'home volume not mounted at " + GUEST_HOME_PATH + "'; exit 1; }; "
+        ? "mountpoint -q " + GUEST_HOME_PATH + " || { echo home-volume-not-mounted at " + GUEST_HOME_PATH + " >&2; exit 1; }; "
         : "") +
       "if docker ps --filter name=webtop --filter status=running -q | grep -q .; then exit 0; fi; docker rm -f webtop 2>/dev/null; exec /usr/bin/docker run -d --name webtop --restart unless-stopped --shm-size=1g -p 8080:3000 " +
       (homeMount ? "-v " + GUEST_HOME_PATH + ":/config " : "") +
@@ -712,7 +716,11 @@ function cloudInitUserData({ homeSource = null } = {}) {
     ...(homeSource ? ["  - mkdir -p " + GUEST_HOME_PATH + " && chown -R user:user " + GUEST_HOME_PATH] : []),
     "  - systemctl daemon-reload",
     "  - systemctl enable webtop.service",
-    "  - systemctl start webtop.service",
+    // --no-block: the unit owns the desktop's lifecycle (it is enabled, ordered
+    // after the NFS home mount, and restarts itself on failure). Blocking here
+    // made cloud-init's final stage wait out the whole first-boot image pull,
+    // and fail with it.
+    "  - systemctl start --no-block webtop.service",
   ].join("\n")
 }
 
