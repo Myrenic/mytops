@@ -140,11 +140,13 @@ function isNotFound(value) {
 // other failure throws, so a caller can never mistake "the apiserver broke"
 // for "the object does not exist" and take the wrong branch.
 async function kubeFetch(method, path, body, reqHeaders) {
-  // PATCH endpoints require a merge-patch content type; everything else is
-  // plain JSON (patch-as-json makes the apiserver answer 415).
+  // Merge patch, not strategic merge patch: custom resources reject the
+  // strategic type outright (a VM PATCH answered 415 - "accepted media types
+  // include: application/merge-patch+json"), and every patch this API sends is
+  // maps and scalars, where the two behave the same. Plain JSON elsewhere.
   const headers = {
     "Content-Type": method === "PATCH"
-      ? "application/strategic-merge-patch+json"
+      ? "application/merge-patch+json"
       : "application/json",
   }
   for (const key of Object.keys(reqHeaders)) {
