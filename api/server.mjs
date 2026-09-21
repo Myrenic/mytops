@@ -1,7 +1,11 @@
 import { createServer } from "node:http"
 
 const PORT = Number(process.env.PORT) || 3001
-const KUBE_API = process.env.KUBE_API || "http://localhost:8001"
+// 127.0.0.1, not localhost: the kubectl-proxy sidecar binds `--address=127.0.0.1`
+// so the name would have to resolve to IPv4 every time, and `localhost` also
+// resolves to ::1 in some images (musl, IPv6-first resolvers), where the proxy
+// is not listening.
+const KUBE_API = process.env.KUBE_API || "http://127.0.0.1:8001"
 const NAMESPACE = process.env.WORKSPACE_NAMESPACE || "services"
 const VM_NAMESPACE = process.env.VM_NAMESPACE || "kubevirt"
 const DOMAIN = process.env.BASE_DOMAIN || ""
@@ -136,9 +140,15 @@ async function kubeFetch(method, path, body, reqHeaders) {
   try {
     res = await fetch(KUBE_API + path, opts)
   } catch (err) {
-    const reason = err?.name === "TimeoutError" ? "timed out after " + KUBE_TIMEOUT_MS + "ms" : String(err?.message ?? err)
-    console.error("kube-api " + method + " " + path + " -> " + reason)
-    throw new KubeError(method, path, 504, reason)
+    const reason = err?.name === "TimeoutError"
+      ? "timed out after " + KUBE_TIMEOUT_MS + "ms"
+      : "unreachable (" + (err?.cause?.code ?? err?.message ?? err) + ")"
+    // The sidecar is the only thing on this port; say so, because the symptom
+    // (502s from every call) is otherwise indistinguishable from an apiserver
+    // outage.
+    const message = reason + " at " + KUBE_API
+    console.error("kube-api " + method + " " + path + " -> " + message)
+    throw new KubeError(method, path, 504, message)
   }
 
   const text = await res.text()
