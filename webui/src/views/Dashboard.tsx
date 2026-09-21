@@ -178,8 +178,8 @@ function Tile({ entry, status, isOpen, onConnect, onRestart, onEnd }: TileProps)
           variant="destructive"
           title={
             armed
-              ? "Click again to destroy this workspace"
-              : "Destroy workspace (also cleans up stale resources)"
+              ? "Click again to destroy this workspace (your home volume is kept)"
+              : "Destroy workspace (also cleans up stale resources; your home volume is kept)"
           }
           onClick={end}
         >

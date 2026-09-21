@@ -15,6 +15,23 @@ const DOMAIN = process.env.BASE_DOMAIN || ""
 // leaves the disk behind forever.
 const LONGHORN_NAMESPACE = process.env.LONGHORN_NAMESPACE || "storage"
 const CATALOG_PATH = process.env.CATALOG_PATH || "/etc/mytops/catalog.json"
+// Per-user home volume: one RWX Longhorn PVC holding the desktop profile, so
+// the same data follows the user between a container workspace and a VM (the
+// VM mounts the Longhorn NFS export, which is the only way a PVC can be shared
+// across the two namespaces). Longhorn RWX volumes are also served over NFS by
+// a share-manager pod in LONGHORN_NAMESPACE, under a Service named after the
+// PersistentVolume.
+const HOME_STORAGE_CLASS = process.env.HOME_STORAGE_CLASS || "longhorn"
+const HOME_STORAGE = process.env.HOME_STORAGE || "20Gi"
+const HOME_PREFIX = "home-"
+// The volume only attaches while something consumes it, and a VM guest mounts
+// it over NFS without being a Kubernetes consumer - so a keeper pod holds it.
+const KEEPER_IMAGE = process.env.KEEPER_IMAGE || "docker.io/library/alpine:3.20"
+// Where the guest mounts the export, and what the in-VM desktop gets as /config.
+const GUEST_HOME_PATH = "/home/user/webtop-config"
+// oauth2-proxy's auth endpoint, for the one caller that cannot present the
+// identity headers (see handleStreamAuth).
+const OAUTH2_AUTH_URL = process.env.OAUTH2_AUTH_URL || "http://oauth2-proxy.auth.svc.cluster.local/oauth2/auth"
 // Every Kubernetes call is bounded: an apiserver that accepts a connection and
 // never answers used to hang the HTTP request (and the SPA's Launch/End button)
 // until the client gave up.
@@ -238,6 +255,9 @@ function buildDeployment(entry, name, owner) {
   const cpuReq = entry.resources?.cpu ?? "250m"
   const memReq = entry.resources?.memory ?? "256Mi"
   const memLim = entry.type === "desktop" ? "4Gi" : "2Gi"
+  // The profile lives on the user's home volume; without it a persistent
+  // desktop still loses everything on the next reschedule.
+  const home = usesHome(entry) ? homeName(owner) : null
   return {
     apiVersion: "apps/v1",
     kind: "Deployment",
@@ -256,6 +276,10 @@ function buildDeployment(entry, name, owner) {
     },
     spec: {
       replicas: 1,
+      // Rolls the old pod away before starting the new one: two desktops must
+      // never write the same profile at once, and a rolling update would
+      // otherwise run both for the length of the transition.
+      ...(home ? { strategy: { type: "Recreate" } } : {}),
       selector: { matchLabels: { "app.kubernetes.io/name": "mytops", "app.kubernetes.io/component": "session", "mytops-owner": owner, "mytops-entry": entry.id } },
       template: {
         metadata: { labels: { "app.kubernetes.io/name": "mytops", "app.kubernetes.io/component": "session", "mytops-owner": owner, "mytops-entry": entry.id } },
@@ -275,7 +299,10 @@ function buildDeployment(entry, name, owner) {
                 ...turnEnv(),
                 ...(entry.env ?? []),
               ],
-              volumeMounts: [{ name: "dshm", mountPath: "/dev/shm" }],
+              volumeMounts: [
+                { name: "dshm", mountPath: "/dev/shm" },
+                ...(home ? [{ name: "home", mountPath: "/config" }] : []),
+              ],
               // readyReplicas only means the process is up without this, which
               // is how a launched workspace reported "Running" while nginx
               // inside it was still 30 s away and the iframe got a 502.
@@ -294,6 +321,7 @@ function buildDeployment(entry, name, owner) {
           ],
           volumes: [
             { name: "dshm", emptyDir: { medium: "Memory", sizeLimit: "1Gi" } },
+            ...(home ? [{ name: "home", persistentVolumeClaim: { claimName: home } }] : []),
           ],
         },
       },
@@ -317,6 +345,11 @@ function buildService(name, owner, entryId) {
   }
 }
 
+// Authentication alone is not authorization: this middleware asks the API
+// whether the authenticated caller owns the workspace host. It is a platform
+// object in nebula (kubernetes/apps/network/ingressroutes/middlewares.yaml).
+const WORKSPACE_OWNER_MIDDLEWARE = { name: "mytops-workspace-owner", namespace: "network" }
+
 // opts.svc overrides the backend (container default: <name> in `services`
 // on 3000; VM workspaces use <name>-svc in the kubevirt ns on 8080).
 function buildIngressRoute(name, domain, opts) {
@@ -331,8 +364,14 @@ function buildIngressRoute(name, domain, opts) {
         {
           match: "Host(`" + name + "." + domain + "`)",
           kind: "Rule",
-          // Keycloak SSO at the edge — replaces selkies/webtop basic auth.
-          middlewares: [{ name: "oauth2-proxy-auth", namespace: "network" }],
+          // oauth2-proxy authenticates at the edge, then
+          // mytops-workspace-owner asks the API whether *this* user owns the
+          // host in the request. Authentication alone let any user in the
+          // realm open any workspace by guessing a hostname.
+          middlewares: [
+            { name: "oauth2-proxy-auth", namespace: "network" },
+            WORKSPACE_OWNER_MIDDLEWARE,
+          ],
           services: [svc],
         },
       ],
@@ -347,6 +386,133 @@ function ingressRoutePath(name) {
   return "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name
 }
 
+// ── Per-user home volume ─────────────────────────────────────────────
+//
+// One RWX PVC per user holds the desktop profile (= what linuxserver images
+// call /config). A container workspace mounts the PVC directly; a VM cannot
+// (a VMI can only reference a PVC from its own namespace), so the guest mounts
+// the same volume over NFS. That NFS export only exists while the volume is
+// attached, which is why a keeper pod consumes it - the VM guest is not a
+// Kubernetes consumer and would otherwise find the export missing at boot.
+function homeName(slug) {
+  return HOME_PREFIX + slug
+}
+
+function homeKeeperName(slug) {
+  return HOME_PREFIX + slug + "-keeper"
+}
+
+// Entries mount the home only if they asked for persistence: an ephemeral
+// entry (a throwaway browser, say) must not hold - or write to - a profile.
+function usesHome(entry) {
+  return entry.persistence === "persistent"
+}
+
+function buildHomePvc(slug, entry) {
+  return {
+    apiVersion: "v1",
+    kind: "PersistentVolumeClaim",
+    metadata: {
+      name: homeName(slug),
+      namespace: NAMESPACE,
+      labels: { "app.kubernetes.io/name": "mytops", "app.kubernetes.io/component": "home", "mytops-owner": slug },
+    },
+    spec: {
+      accessModes: ["ReadWriteMany"],
+      storageClassName: HOME_STORAGE_CLASS,
+      resources: { requests: { storage: entry.homeStorage ?? HOME_STORAGE } },
+    },
+  }
+}
+
+function buildHomeKeeper(slug) {
+  const labels = { "app.kubernetes.io/name": "mytops", "app.kubernetes.io/component": "home-keeper", "mytops-owner": slug }
+  return {
+    apiVersion: "apps/v1",
+    kind: "Deployment",
+    metadata: { name: homeKeeperName(slug), namespace: NAMESPACE, labels },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: labels },
+      template: {
+        metadata: { labels },
+        spec: {
+          automountServiceAccountToken: false,
+          nodeSelector: nodeSelector(),
+          securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: "RuntimeDefault" } },
+          containers: [
+            {
+              name: "keeper",
+              image: KEEPER_IMAGE,
+              command: ["sleep", "infinity"],
+              volumeMounts: [{ name: "home", mountPath: "/home" }],
+              readinessProbe: { exec: { command: ["sh", "-c", "test -d /home"] }, periodSeconds: 30 },
+              resources: { requests: { cpu: "5m", memory: "16Mi" }, limits: { memory: "64Mi" } },
+              securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } },
+            },
+          ],
+          volumes: [{ name: "home", persistentVolumeClaim: { claimName: homeName(slug) } }],
+        },
+      },
+    },
+  }
+}
+
+// The share-manager Service (and therefore the NFS export) is named after the
+// PersistentVolume, not after the PVC, so the export address is only known once
+// the claim has bound.
+function homeNfsSource(pvName) {
+  return pvName + "." + LONGHORN_NAMESPACE + ".svc.cluster.local:/" + pvName
+}
+
+// Create the home volume if needed and make sure something holds it attached,
+// then return the NFS source its VM guest should mount (null when the volume
+// never bound, in which case the caller must not pretend it has one).
+async function ensureHome(slug, entry, headers, { waitForBind = false } = {}) {
+  const pvcPath = "/api/v1/namespaces/" + NAMESPACE + "/persistentvolumeclaims/" + homeName(slug)
+  const existing = await kubeFetch("GET", pvcPath, null, headers).catch(() => null)
+  if (isNotFound(existing)) {
+    await kubeFetch("POST", "/api/v1/namespaces/" + NAMESPACE + "/persistentvolumeclaims",
+      buildHomePvc(slug, entry), headers)
+  }
+
+  const keeperPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + homeKeeperName(slug)
+  const keeper = await kubeFetch("GET", keeperPath, null, headers).catch(() => null)
+  if (isNotFound(keeper)) {
+    await kubeFetch("POST", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments",
+      buildHomeKeeper(slug), headers)
+  }
+
+  if (!waitForBind) return null
+
+  // The keeper is the first consumer, so this normally binds within seconds.
+  let pvName = null
+  const bound = await waitFor(async () => {
+    const pvc = await kubeFetch("GET", pvcPath, null, headers)
+    pvName = pvc?.spec?.volumeName ?? null
+    return !!pvName
+  }, 90_000, 2000)
+  if (!bound) {
+    console.error("home volume " + homeName(slug) + " did not bind within 90s")
+    return null
+  }
+  return homeNfsSource(pvName)
+}
+
+// The route must carry both middlewares, in order: authentication first, then
+// the ownership check. A route created before the owner check existed (or with
+// its middlewares reordered) is drifted and has to be rebuilt too.
+function ingressRouteMatches(route, svc) {
+  const backend = route?.spec?.routes?.[0]?.services?.[0]
+  const middlewares = route?.spec?.routes?.[0]?.middlewares ?? []
+  return !!backend && backend.name === svc.name &&
+    (backend.namespace ?? NAMESPACE) === svc.namespace && backend.port === svc.port &&
+    middlewares.length === 2 &&
+    middlewares[0].name === "oauth2-proxy-auth" && middlewares[0].namespace === "network" &&
+    middlewares[1].name === WORKSPACE_OWNER_MIDDLEWARE.name &&
+    middlewares[1].namespace === WORKSPACE_OWNER_MIDDLEWARE.namespace
+}
+
 // Reconcile one IngressRoute against the backend this workspace needs.
 //
 // The network-namespace Role grants get/list/create/delete on IngressRoutes -
@@ -356,10 +522,7 @@ function ingressRoutePath(name) {
 async function ensureIngressRoute(name, domain, svc, headers) {
   const path = ingressRoutePath(name)
   const current = await kubeFetch("GET", path, null, headers).catch(() => null)
-  const backend = current?.spec?.routes?.[0]?.services?.[0]
-  const matches = !!backend && backend.name === svc.name &&
-    (backend.namespace ?? NAMESPACE) === svc.namespace && backend.port === svc.port
-  if (matches) return
+  if (ingressRouteMatches(current, svc)) return
   if (current && !isNotFound(current)) {
     await kubeFetch("DELETE", path, null, headers)
       .catch((err) => console.error("ingressroute replace: " + err.message))
@@ -379,6 +542,12 @@ async function ensureService(namespace, name, build, headers) {
 // so both drop the VM disk and its retained Longhorn volume - admin destroy
 // used to leave a 10Gi ghost per workspace behind.
 // Returns the list of errors; a 404 is not an error (nothing to delete).
+//
+// Only objects named after the instance (`ws-<entry>-<slug>`) are touched. The
+// user's home volume is a separate object (`home-<slug>`) and deliberately
+// survives a destroy: that is what lets a VM be rebuilt from scratch without
+// throwing the desktop profile away. Never widen these deletes into a selector
+// - it would take the user's data with it.
 async function teardownWorkspace(name, headers) {
   const failures = []
   const del = async (path) => {
@@ -457,19 +626,29 @@ function webtopEnvFlags() {
   return pairs.map((kv) => "-e " + kv).join(" ")
 }
 
-function webtopUnit() {
+function webtopUnit({ homeMount = false } = {}) {
   return [
     "[Unit]",
     "Description=LSIO webtop container desktop",
     "After=network-online.target docker.service",
     "Wants=network-online.target docker.service",
     "Requires=docker.service",
+    // The desktop's /config lives on the NFS-mounted home volume, so the unit
+    // must not start before it is there - and must be restarted if the mount
+    // comes later (see Restart= on-failure below).
+    ...(homeMount ? ["RequiresMountsFor=" + GUEST_HOME_PATH] : []),
     "[Service]",
     "Type=oneshot",
     "RemainAfterExit=yes",
     // Pull retries: registry hiccups shouldn't brick a fresh VM boot.
     "ExecStartPre=-/bin/sh -c 'for i in 1 2 3 4 5; do /usr/bin/docker pull " + WEBTOP_IMAGE + " && break; sleep 20; done'",
-    "ExecStart=/bin/sh -c 'if docker ps --filter name=webtop --filter status=running -q | grep -q .; then exit 0; fi; docker rm -f webtop 2>/dev/null; exec /usr/bin/docker run -d --name webtop --restart unless-stopped --shm-size=1g -p 8080:3000 " + webtopEnvFlags() + " " + WEBTOP_IMAGE + "'",
+    "ExecStart=/bin/sh -c '" +
+      (homeMount
+        ? "mountpoint -q " + GUEST_HOME_PATH + " || { echo 'home volume not mounted at " + GUEST_HOME_PATH + "'; exit 1; }; "
+        : "") +
+      "if docker ps --filter name=webtop --filter status=running -q | grep -q .; then exit 0; fi; docker rm -f webtop 2>/dev/null; exec /usr/bin/docker run -d --name webtop --restart unless-stopped --shm-size=1g -p 8080:3000 " +
+      (homeMount ? "-v " + GUEST_HOME_PATH + ":/config " : "") +
+      webtopEnvFlags() + " " + WEBTOP_IMAGE + "'",
     // The first boot pulls desktop and browser images inside the guest, which
     // is minutes on a good link; 10 minutes was short enough to fail, and a
     // failed pull left the unit failed and the desktop dead with nothing to
@@ -484,7 +663,7 @@ function webtopUnit() {
   ].join("\n")
 }
 
-function cloudInitUserData() {
+function cloudInitUserData({ homeSource = null } = {}) {
   return [
     "#cloud-config",
     "users:",
@@ -494,12 +673,20 @@ function cloudInitUserData() {
     "    lock_passwd: false",
     "    shell: /bin/bash",
     "    groups: sudo, ssl-cert",
+    // The home volume is served by Longhorn's share-manager over NFS; hard
+    // keeps a busy desktop from seeing write errors when the share blips.
+    ...(homeSource
+      ? [
+          "mounts:",
+          "  - [ '" + homeSource + "', '" + GUEST_HOME_PATH + "', 'nfs', 'nfsvers=4.1,hard,noatime,_netdev', '0', '0' ]",
+        ]
+      : []),
     // write_files: heredocs inside runcmd break, so files land from here.
     "write_files:",
     "  - path: /etc/systemd/system/webtop.service",
     "    permissions: '0644'",
     "    content: |",
-    "      " + webtopUnit().split("\n").join("\n      "),
+    "      " + webtopUnit({ homeMount: !!homeSource }).split("\n").join("\n      "),
     // Not the packages: block — it does not retry and one transient mirror
     // hiccup killed the entire first boot (verified). Retry the install.
     "runcmd:",
@@ -509,7 +696,7 @@ function cloudInitUserData() {
     "      sleep 10",
     "    done",
     "    for i in 1 2 3; do",
-    "      apt-get install -y -o Acquire::Retries=5 ca-certificates curl jq >/var/log/mytops-packages.log 2>&1 && break",
+    "      apt-get install -y -o Acquire::Retries=5 ca-certificates curl jq nfs-common >/var/log/mytops-packages.log 2>&1 && break",
     "      sleep 30",
     "    done",
     // Docker runtime (jammy has docker.io for the engine; kasm apt repos are not needed).
@@ -519,11 +706,10 @@ function cloudInitUserData() {
     "      sleep 30",
     "    done",
     "    systemctl enable --now docker",
-    // The guest's /config lives on the Longhorn root disk, so a VM desktop
-    // keeps its state across reboots. A container workspace does NOT: it has
-    // no /config volume, so its desktop state is pod-local and dies with the
-    // pod even though the catalog entry says persistence: persistent.
-    "  - mkdir -p /home/user/webtop/config && chown -R user:user /home/user/webtop",
+    // The guest's /config lives on the Longhorn home volume (or, for an
+    // ephemeral entry, in the container) - never on the VM's root disk, so the
+    // VM can be rebuilt from scratch without losing the user's data.
+    ...(homeSource ? ["  - mkdir -p " + GUEST_HOME_PATH + " && chown -R user:user " + GUEST_HOME_PATH] : []),
     "  - systemctl daemon-reload",
     "  - systemctl enable webtop.service",
     "  - systemctl start webtop.service",
@@ -677,6 +863,53 @@ function isAdmin(identity) {
   return (identity.groups ?? "").split(",").some((g) => ADMIN_GROUPS.has(g.trim()))
 }
 
+// GET /api/stream-auth — Traefik forwardAuth for the workspace hosts.
+//
+// The workspace IngressRoutes are matched by hostname only, and that hostname
+// is derived from the owner's email, so "signed in" was the whole test: anyone
+// in the realm could open anyone's desktop by guessing a URL. This endpoint is
+// what the mytops-workspace-owner middleware asks, after oauth2-proxy has
+// authenticated the request, and it answers one question: does the caller own
+// the host in this request?
+//
+// The caller is oauth2-proxy's authenticated identity, which reaches us either
+// as the identity headers (oauth2-proxy's forwardAuth sets them on the request,
+// and Traefik passes them on to the next middleware) or, if that ever stops
+// being true, as the session cookie we can validate against oauth2-proxy here.
+// Admins pass, so support can still reach a workspace.
+async function handleStreamAuth(req, res, identity) {
+  const host = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "")
+    .replace(/:\d+$/, "")
+    .toLowerCase()
+  const label = host.split(".")[0]
+
+  // One identity, from one source: either the headers oauth2-proxy's own
+  // forwardAuth put on the request, or (if those are missing) a fresh check of
+  // the session cookie. Never a mix - a group list taken from the client's
+  // headers would be a way to grant yourself the admin bypass below.
+  let email = identity.email
+  let groups = identity.groups
+  if (!email) {
+    const cookie = req.headers.cookie
+    if (!cookie || !OAUTH2_AUTH_URL) return json(res, 401, { error: "unauthenticated" })
+    const auth = await fetch(OAUTH2_AUTH_URL, { headers: { cookie }, signal: AbortSignal.timeout(5000) })
+      .catch((err) => {
+        console.error("stream-auth: oauth2-proxy unreachable: " + err.message)
+        return null
+      })
+    if (!auth || !auth.ok) return json(res, 401, { error: "unauthenticated" })
+    email = auth.headers.get("x-auth-request-email") ?? ""
+    groups = auth.headers.get("x-auth-request-groups") ?? ""
+    if (!email) return json(res, 401, { error: "unauthenticated" })
+  }
+
+  const ownsHost = label.startsWith("ws-") && label.endsWith("-" + slugFor(email))
+  if (ownsHost || isAdmin({ groups })) return json(res, 200, { ok: true })
+
+  console.warn("stream-auth: " + email + " denied for " + host)
+  json(res, 403, { error: "not your workspace" })
+}
+
 // GET /api/health
 function handleHealth(_req, res) {
   json(res, 200, { ok: true })
@@ -700,12 +933,17 @@ async function handleListWorkspaces(req, res, identity) {
     req.headers,
   )
   const depItems = depList.items ?? []
-  const containerWs = depItems
+  const containerWs = await Promise.all(depItems
     .filter((d) => d.metadata?.name?.startsWith("ws-"))
-    .map((d) => {
+    .map(async (d) => {
       const name = d.metadata.name
       const entryId = entryIdOf(name, slug)
       const entry = catalog.find((e) => e.id === entryId)
+      // Self-heal like the VM branch below: a route created before the owner
+      // middleware existed (or with a stale backend) is rebuilt here rather
+      // than only on the next launch.
+      await ensureIngressRoute(name, domain, { name, namespace: NAMESPACE, port: 3000 }, req.headers)
+        .catch((err) => console.error("workspace " + name + ": " + err.message))
       return {
         id: entryId,
         name: entry?.name ?? entryId,
@@ -715,7 +953,7 @@ async function handleListWorkspaces(req, res, identity) {
         status: containerWorkspaceStatus(d),
         url: "https://" + name + "." + domain,
       }
-    })
+    }))
 
   // ── VM workspaces (VirtualMachines in kubevirt ns) ───────────────
   let vmItems = []
@@ -814,6 +1052,9 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
     })
   }
 
+  // The claim must exist before the pod that mounts it.
+  if (usesHome(entry)) await ensureHome(slug, entry, req.headers)
+
   await kubeFetch("POST", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments",
     buildDeployment(entry, name, slug), req.headers)
 
@@ -839,11 +1080,25 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
     })
   }
 
+  // The guest mounts the user's home over NFS, and the mount source only
+  // exists once the claim has bound, so this has to resolve before the
+  // cloud-init Secret is written. Failing loudly beats booting a desktop whose
+  // profile silently lives on the throwaway root disk.
+  let homeSource = null
+  if (usesHome(entry)) {
+    homeSource = await ensureHome(slug, entry, req.headers, { waitForBind: true })
+    if (!homeSource) {
+      return json(res, 503, {
+        error: "home volume " + homeName(slug) + " did not become ready; try again in a moment",
+      })
+    }
+  }
+
   const secretPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit"
   const secExists = await kubeFetch("GET", secretPath, null, req.headers)
   if (isNotFound(secExists)) {
     await kubeFetch("POST", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets",
-      buildCloudInitSecret(name, cloudInitUserData()), req.headers)
+      buildCloudInitSecret(name, cloudInitUserData({ homeSource })), req.headers)
   }
 
   await kubeFetch("POST", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines",
@@ -980,6 +1235,10 @@ const server = createServer(async (req, res) => {
   // 502.
   try {
     if (path === "/api/health" && req.method === "GET") return await handleHealth(req, res)
+    // Before the identity guard: this route resolves the caller itself, since
+    // Traefik calls it with the request's session cookie as well as (normally)
+    // oauth2-proxy's identity headers.
+    if (path === "/api/stream-auth" && req.method === "GET") return await handleStreamAuth(req, res, identity)
     if (!identity.email) return json(res, 401, { error: "unauthenticated" })
 
     if (path === "/api/me" && req.method === "GET") return json(res, 200, { email: identity.email, groups: identity.groups })

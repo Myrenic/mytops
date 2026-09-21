@@ -9,7 +9,7 @@ resources:
   - ./mytops-api-catalog.configmap.json
   - ./mytops-workplace-api.configmap.json
   - ./idle-culler.yaml
-  - ./idle-culler-script.yaml
+  - ./mytops-idle-culler.configmap.json
   - ./mytops-turn.yaml
   - ./coturn.yaml
   - ./mytops-webui.configmap.json

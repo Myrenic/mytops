@@ -42,9 +42,23 @@ catalog to this SPA and validates every launch against it.
 An entry needs `id`, `name`, `type` (`desktop`/`app`), an optional
 `icon`/`description`, and for containers an `image`. Optional: `runtime`
 (`container` or `vm-linux`/`vm-windows`), `persistence`, `lifecycle`,
-`resources` (`cpu`/`memory`), `storage` (VM disk size) and `env`. An entry with
-no `groups` is visible to everyone signed in; otherwise the launch is gated on
-one of those Keycloak groups.
+`resources` (`cpu`/`memory`), `storage` (VM root disk size), `homeStorage`
+(size of the user's home volume) and `env`. An entry with no `groups` is
+visible to everyone signed in; otherwise the launch is gated on one of those
+Keycloak groups.
+
+### Persistence and the home volume
+
+`persistence: persistent` entries mount the user's home volume at `/config` (or
+the VM equivalent, see below); `disposable` ones do not, so a throwaway session
+never holds - or writes to - a profile.
+
+There is one home volume per *user* (`home-<slug>`, ReadWriteMany, 20Gi by
+default), not per entry, so the same desktop reaches a user from either kind of
+workspace: a container workspace mounts the PVC directly, and a VM's guest
+mounts the same volume over NFS. Destroying a workspace keeps the home volume -
+that is the point of it - so a `storage`/`homeStorage` bump is the only place
+sizes appear, and clearing a user's data is a deliberate manual act.
 
 ## Local dev
 

@@ -83,6 +83,7 @@ values are `${...}` placeholders that nebula substitutes from its
 | Placeholder | Where the value lives |
 | --- | --- |
 | `TURN_SHARED_SECRET` | `nebula/kubernetes/apps/common/cluster-secrets.sops.yaml` |
+| `SECRET_DOMAIN_0` (`BASE_DOMAIN` in `base/webui.yaml`) | same bundle |
 
 Rotating the TURN shared secret therefore happens in nebula; the pods here read it
 from the environment, so rotation needs a restart:
@@ -144,20 +145,29 @@ Two consequences for the API code, both of which it has to respect:
 - Launch and restart answer as soon as the objects are created/patched and let the
   SPA's 5 s poll report the outcome; nothing in the API blocks for minutes while a pod
   pulls an image.
-- coturn runs `hostNetwork` on `TURN_HOST` and relays UDP `61000-65535`; WebRTC media
-  from the browser goes straight to it, not through the ingress. The API maps the
-  `mytops-turn` Secret's `TURN_*` variables onto `SELKIES_TURN_*` for both kinds of
-  workspace. A VM bakes that config into its cloud-init Secret at creation time, so
-  rotating the shared secret only reaches an existing VM after it is destroyed and
-  relaunched.
-- Container workspaces keep their desktop state in the pod: the Deployment has no
-  `/config` volume, so a `persistence: persistent` container entry survives a
-  restart of the *pod schedule* but not a reschedule, eviction or destroy. Only VM
-  workspaces carry their `/config` on the Longhorn disk. Adding the volume is a
-  deliberate change, not an oversight - it needs a PVC per user plus the PVC verbs in
-  the services-namespace Role, and the culler would have to clean it up.
-- Whoever can authenticate to the realm can open any workspace URL: the per-workspace
-  IngressRoutes carry the `oauth2-proxy-auth` middleware, which authenticates but does
-  not authorize, and the instance name in the host is derived from the owner's email.
-  Scoping a route to its owner needs a platform-side forward-auth (a Middleware that
-  asks the API whether the email in the request owns the host in the request).
+- **The user's data lives in a per-user home volume, not in a workspace.**
+  `home-<slug>` is a ReadWriteMany Longhorn PVC in `services` holding the
+  desktop profile (what linuxserver images call `/config`). A container
+  workspace mounts the PVC; a VM cannot (a VMI may only reference a PVC from its
+  own namespace), so the guest mounts the same volume over NFS instead. That
+  export is the share-manager Service in `storage`, named after the
+  PersistentVolume (`<pv>.<storage-ns>.svc.cluster.local:/<pv>`), which only
+  exists while the volume is attached - hence `home-<slug>-keeper`, a pod whose
+  whole job is to hold it attached for the VM case.
+  Consequences worth knowing: destroying a workspace never deletes the home
+  (that is what makes a VM rebuildable from scratch without losing work), a
+  persistent entry rolls with `strategy: Recreate` so two desktops never write
+  one profile at once, and deleting the home is a deliberate manual act
+  (`kubectl -n services delete deploy home-<slug>-keeper pvc home-<slug>` plus
+  the PV/Longhorn volume behind it).
+- **Streams are owner-scoped.** Workspace IngressRoutes carry two middlewares:
+  `oauth2-proxy-auth` (the existing chain) and `mytops-workspace-owner`, a
+  forwardAuth declared in nebula that asks `GET /api/stream-auth` whether the
+  signed-in user owns the host in the request. Authentication alone used to be
+  the whole gate, and a workspace host is derived from its owner's email, so
+  any user in the realm could open anyone's desktop. The endpoint trusts only
+  identity resolved from oauth2-proxy's own headers or from its session cookie -
+  never a client-supplied header - and admins pass.
+- The API's kubectl-proxy is reached on `127.0.0.1:8001` (the sidecar binds
+  `--address=127.0.0.1`); do not "simplify" that to `localhost`, which resolves
+  to `::1` first in some images.

@@ -47,6 +47,8 @@ export interface CatalogEntry {
   resources?: { cpu?: string; memory?: string }
   /** VM-only: PVC size for the root disk. */
   storage?: string
+  /** Size of the per-user home volume this entry mounts (persistent entries). */
+  homeStorage?: string
 }
 
 export interface Me {

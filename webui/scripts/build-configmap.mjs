@@ -73,6 +73,36 @@ console.log(
   )} KiB)`
 )
 
+// ── Idle-culler ConfigMap (single source of truth: base/cull.sh) ──────
+// The script has to be base64 (plain ConfigMap data is envsubst'd by Flux
+// postBuild, which eats its shell variables), but it must stay reviewable: as a
+// stored blob nobody could grep it, and a label rename left it culling nothing
+// for weeks. Source text here, encoding at build time.
+const cullSrc = join(base, "cull.sh")
+const cullScript = await readFile(cullSrc, "utf8")
+
+// The culler selects workspaces by these labels; if either side of the contract
+// renames one, the job goes quiet instead of failing. Catch it here.
+for (const label of ["mytops-owner", "mytops-lifecycle", "mytops-runtime"]) {
+  if (!cullScript.includes(label) || !serverCode.includes(label)) {
+    throw new Error(
+      `${label} is missing from ${!cullScript.includes(label) ? "base/cull.sh" : "api/server.mjs"}; ` +
+        `the idle culler and the API must agree on workspace labels`
+    )
+  }
+}
+
+const cullOut = join(base, "mytops-idle-culler.configmap.json")
+const cullConfigMap = {
+  apiVersion: "v1",
+  kind: "ConfigMap",
+  metadata: { name: "mytops-idle-culler-script" },
+  binaryData: { "cull.sh": Buffer.from(cullScript).toString("base64") },
+}
+
+await writeFile(cullOut, JSON.stringify(cullConfigMap, null, 2) + "\n")
+console.log(`wrote ${cullOut} (cull.sh, ${Buffer.byteLength(cullScript)} bytes)`)
+
 // ── Catalog ConfigMap (single source of truth: public/catalog.json) ───
 // The API validates every launch against this catalog (including the group
 // ACL) and serves it to the SPA, so it has to be the same list the SPA ships.

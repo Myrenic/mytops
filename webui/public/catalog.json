@@ -10,7 +10,10 @@
       "lifecycle": "suspend",
       "icon": "🐧",
       "image": "ghcr.io/linuxserver/webtop:ubuntu-kde",
-      "resources": { "cpu": "500m", "memory": "512Mi" },
+      "resources": {
+        "cpu": "500m",
+        "memory": "512Mi"
+      },
       "env": [
         {
           "name": "PIXELFLUX_WAYLAND",
@@ -19,7 +22,8 @@
       ],
       "groups": [
         "ubuntu-desktop"
-      ]
+      ],
+      "homeStorage": "20Gi"
     },
     {
       "id": "firefox",
@@ -54,8 +58,12 @@
       "persistence": "persistent",
       "lifecycle": "persistent",
       "icon": "🖥️",
-      "resources": { "cpu": "2", "memory": "2Gi" },
+      "resources": {
+        "cpu": "2",
+        "memory": "2Gi"
+      },
       "storage": "10Gi",
+      "homeStorage": "20Gi",
       "groups": [
         "ubuntu-vm"
       ]
