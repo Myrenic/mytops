@@ -63,6 +63,12 @@ spec:
               value: "services"
             - name: CATALOG_PATH
               value: "/etc/mytops/catalog.json"
+            # Workspace URLs are built from this. Without it the API derives
+            # the domain from the request's Host header, which is right through
+            # Traefik but nonsense for anything reaching the pod directly (a
+            # port-forward or the pod IP yields "0.0.1").
+            - name: BASE_DOMAIN
+              value: "${SECRET_DOMAIN_0}"
             # Where the Longhorn CRs live (the namespace its Flux Kustomization
             # targets, and where the matching Role in nebula is created). The
             # API deletes the volume behind a destroyed VM workspace; pointing
