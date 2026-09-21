@@ -157,7 +157,11 @@ Two consequences for the API code, both of which it has to respect:
   Consequences worth knowing: destroying a workspace never deletes the home
   (that is what makes a VM rebuildable from scratch without losing work), a
   persistent entry rolls with `strategy: Recreate` so two desktops never write
-  one profile at once, and deleting the home is a deliberate manual act
+  one profile at once - and the home is per *user*, so two *different*
+  persistent entries running at the same time (say a container desktop and a VM
+  desktop) do write one profile; the catalog has one of each today, and each is
+  a full desktop, so treat that as a thing to avoid rather than a feature.
+  Deleting the home is a deliberate manual act
   (`kubectl -n services delete deploy home-<slug>-keeper pvc home-<slug>` plus
   the PV/Longhorn volume behind it).
 - **Streams are owner-scoped.** Workspace IngressRoutes carry two middlewares:
