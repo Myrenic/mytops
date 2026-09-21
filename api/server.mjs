@@ -470,7 +470,13 @@ function webtopUnit() {
     // Pull retries: registry hiccups shouldn't brick a fresh VM boot.
     "ExecStartPre=-/bin/sh -c 'for i in 1 2 3 4 5; do /usr/bin/docker pull " + WEBTOP_IMAGE + " && break; sleep 20; done'",
     "ExecStart=/bin/sh -c 'if docker ps --filter name=webtop --filter status=running -q | grep -q .; then exit 0; fi; docker rm -f webtop 2>/dev/null; exec /usr/bin/docker run -d --name webtop --restart unless-stopped --shm-size=1g -p 8080:3000 " + webtopEnvFlags() + " " + WEBTOP_IMAGE + "'",
-    "TimeoutStartSec=600",
+    // The first boot pulls desktop and browser images inside the guest, which
+    // is minutes on a good link; 10 minutes was short enough to fail, and a
+    // failed pull left the unit failed and the desktop dead with nothing to
+    // retry it. Retry instead, and give the pull room to finish.
+    "TimeoutStartSec=1800",
+    "Restart=on-failure",
+    "RestartSec=30",
     "ExecStop=/usr/bin/docker stop webtop",
     "RemainAfterExit=yes",
     "[Install]",
