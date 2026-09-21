@@ -106,4 +106,25 @@ while IFS="$(printf '\t')" read -r name created owner lifecycle; do
   fi
 done
 
+# CDI imports a VM disk through a scratch volume (`prime-<uuid>-scratch`) that it
+# deletes when the import finishes. The storage class retains, so every import
+# leaves the PV behind as Released with its Longhorn volume still allocated -
+# 10Gi per VM build, which adds up fast now that rebuilding a VM is cheap. Match
+# strictly on CDI's scratch naming in the PV's claimRef, so a workspace's own
+# disk (`ws-...`) or a home volume (`home-...`) can never be selected.
+echo "-- released import scratch volumes"
+kubectl get pv \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.spec.claimRef.name}{"\n"}{end}' |
+while IFS="$(printf '\t')" read -r pvname phase claim; do
+  [ -z "$pvname" ] && continue
+  case "$claim" in
+    prime-*-scratch) ;;
+    *) continue ;;
+  esac
+  [ "$phase" = "Released" ] || continue
+  echo "Releasing import scratch ${pvname} (was ${claim})"
+  kubectl delete pv "$pvname" --ignore-not-found 2>&1 || true
+  kubectl delete "volumes.longhorn.io/$pvname" -n storage --ignore-not-found 2>&1 || true
+done
+
 echo "Done."
