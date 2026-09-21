@@ -1,4 +1,4 @@
-# shacdn
+# mytops
 
 Browser workspace launcher behind `https://apps.<cluster-domain>`: an nginx-served
 Vite/React SPA plus a small workplace API. The API validates requests server-side,
@@ -32,8 +32,8 @@ kubectl kustomize . >/dev/null
 ```
 
 `npm run build` runs `tsc -b`, vite, and `webui/scripts/build-configmap.mjs`, which
-regenerates `base/www`, `base/shacdn-webui.configmap.json` and
-`base/shacdn-workplace-api.configmap.json`. The build is byte-reproducible, which is
+regenerates `base/www`, `base/mytops-webui.configmap.json` and
+`base/mytops-workplace-api.configmap.json`. The build is byte-reproducible, which is
 what CI checks: build, then `git diff --exit-code`. If you change `webui/` or
 `api/server.mjs` and the diff is not empty, you forgot to commit the regenerated
 bundles - ConfigMaps do not hot-reload, so a stale bundle silently keeps running.
@@ -46,8 +46,8 @@ errors; it is deliberately not part of the gate.
 Flux in nebula reconciles this repository:
 
 ```
-nebula/kubernetes/apps/services/shacdn/source.yaml  -> GitRepository (this repo, branch main)
-nebula/kubernetes/apps/services/shacdn/ks.yaml      -> Kustomization, path ./base,
+nebula/kubernetes/apps/services/mytops/source.yaml  -> GitRepository (this repo, branch main)
+nebula/kubernetes/apps/services/mytops/ks.yaml      -> Kustomization, path ./base,
                                                        targetNamespace: services,
                                                        postBuild.substituteFrom: cluster-secrets
 ```
@@ -55,19 +55,19 @@ nebula/kubernetes/apps/services/shacdn/ks.yaml      -> Kustomization, path ./bas
 Push here, then either wait for the 1 minute poll or force it:
 
 ```bash
-flux reconcile kustomization shacdn -n flux-system --with-source
-kubectl -n services rollout status deploy/shacdn-webui --timeout=180s
+flux reconcile kustomization mytops -n flux-system --with-source
+kubectl -n services rollout status deploy/mytops-webui --timeout=180s
 ```
 
 ConfigMap changes do not restart pods. After a bundle change:
 
 ```bash
-kubectl -n services rollout restart deploy/shacdn-webui
+kubectl -n services rollout restart deploy/mytops-webui
 ```
 
 ## Secrets
 
-No secret is stored in this repository. `base/shacdn-turn.yaml` is a Secret whose
+No secret is stored in this repository. `base/mytops-turn.yaml` is a Secret whose
 values are `${...}` placeholders that nebula substitutes from its
 `cluster-secrets` SOPS bundle at build time:
 
@@ -79,14 +79,14 @@ Rotating the TURN shared secret therefore happens in nebula; the pods here read 
 from the environment, so rotation needs a restart:
 
 ```bash
-kubectl -n services rollout restart deploy/shacdn-coturn deploy/shacdn-webui
+kubectl -n services rollout restart deploy/mytops-coturn deploy/mytops-webui
 ```
 
 Two things to know about that placeholder: Flux substitutes into the built YAML
 *before* it is parsed and kustomize drops the quotes around a placeholder that is a
 whole scalar, so a numeric-looking value is applied as an integer and the API server
 rejects the Secret (`stringData.TURN_PORT: expected string, got 3478`). Settings that
-look numeric (`TURN_PORT`) are literals in `base/shacdn-turn.yaml` for that reason, and
+look numeric (`TURN_PORT`) are literals in `base/mytops-turn.yaml` for that reason, and
 the secret itself is generated as hex (`openssl rand -hex 32`) so it can never be
 all-digits.
 
@@ -99,7 +99,7 @@ platform files in nebula:
 | Grant | File |
 | --- | --- |
 | create/delete IngressRoutes in `network` | `nebula/kubernetes/apps/network/ingressroutes/control.yaml` |
-| delete `volumes.longhorn.io` in `storage` (VM disk teardown) | `nebula/kubernetes/apps/storage/shacdn-rbac.yaml` |
+| delete `volumes.longhorn.io` in `storage` (VM disk teardown) | `nebula/kubernetes/apps/storage/mytops-rbac.yaml` |
 
 ## Operating notes
 
@@ -109,7 +109,7 @@ platform files in nebula:
   IngressRoutes and Longhorn volumes.
 - A NetworkPolicy in `base/` allows ingress to the webui pod from the `network`
   namespace (Traefik) only.
-- `shacdn-idle-culler` deletes sessions whose `shacdn-lifecycle` label is
+- `mytops-idle-culler` deletes sessions whose `mytops-lifecycle` label is
   `ephemeral`/`disposable` and that are older than `MAX_LIFETIME_MINUTES` (480).
   `suspend` and `persistent` sessions are never culled: the job has no idle signal,
   only creation age.

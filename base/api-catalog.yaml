@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: shacdn-api-catalog
+  name: mytops-api-catalog
   namespace: services
 data:
   catalog.json: |

@@ -1,19 +1,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: shacdn-webui
+  name: mytops-webui
   namespace: services
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: shacdn-webui
+      app: mytops-webui
   template:
     metadata:
       labels:
-        app: shacdn-webui
+        app: mytops-webui
     spec:
-      serviceAccountName: shacdn-control
+      serviceAccountName: mytops-control
       containers:
         - name: webui
           image: nginx:1.27-alpine
@@ -52,7 +52,7 @@ spec:
         # kubectl-proxy sidecar.  The browser never touches the K8s API.
         - name: workplace-api
           image: docker.io/library/node:22-alpine
-          command: ["node", "/etc/shacdn-api/server.mjs"]
+          command: ["node", "/etc/mytops-api/server.mjs"]
           ports:
             - name: workplace
               containerPort: 3001
@@ -62,7 +62,7 @@ spec:
             - name: WORKSPACE_NAMESPACE
               value: "services"
             - name: CATALOG_PATH
-              value: "/etc/shacdn/catalog.json"
+              value: "/etc/mytops/catalog.json"
             # Streaming desktops are frame-latency sensitive; talos-sz9-1vs
             # carries more control-plane churn (etcd, apiserver) and panicked
             # to load 10.6/8 vs 0.9 on talos-45w-c87. Move workspace pods off
@@ -71,13 +71,13 @@ spec:
               value: "talos-45w-c87"
           envFrom:
             - secretRef:
-                name: shacdn-turn
+                name: mytops-turn
           volumeMounts:
             - name: api-catalog
-              mountPath: /etc/shacdn
+              mountPath: /etc/mytops
               readOnly: true
             - name: api-code
-              mountPath: /etc/shacdn-api
+              mountPath: /etc/mytops-api
               readOnly: true
           resources:
             requests:
@@ -97,7 +97,7 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
-        # Proxies the Kubernetes API (RBAC-scoped to the shacdn-control
+        # Proxies the Kubernetes API (RBAC-scoped to the mytops-control
         # ServiceAccount) so the workplace-api can provision workspace pods.
         - name: kubectl-proxy
           image: alpine/k8s:1.36.0
@@ -120,16 +120,16 @@ spec:
       volumes:
         - name: webui
           configMap:
-            name: shacdn-webui
+            name: mytops-webui
         - name: nginx-conf
           configMap:
-            name: shacdn-nginx
+            name: mytops-nginx
         - name: api-catalog
           configMap:
-            name: shacdn-api-catalog
+            name: mytops-api-catalog
         - name: api-code
           configMap:
-            name: shacdn-workplace-api
+            name: mytops-workplace-api
         - name: cache
           emptyDir: {}
         - name: run
@@ -138,11 +138,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: shacdn-webui
+  name: mytops-webui
   namespace: services
 spec:
   selector:
-    app: shacdn-webui
+    app: mytops-webui
   ports:
     - name: http
       port: 80

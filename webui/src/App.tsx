@@ -43,15 +43,15 @@ export function App() {
   // Keep launches across refreshes: the provisioning POST is in-flight for
   // minutes. The tile shows Starting until the server list sees the workspace.
   const [startingId, setStartingId] = useState<string | null>(() =>
-    sessionStorage.getItem("shacdn-starting")
+    sessionStorage.getItem("mytops-starting")
   )
   const setStartingPinned = (id: string | null) => {
     if (id) {
-      sessionStorage.setItem("shacdn-starting", id)
-      sessionStorage.setItem("shacdn-starting-at", String(Date.now()))
+      sessionStorage.setItem("mytops-starting", id)
+      sessionStorage.setItem("mytops-starting-at", String(Date.now()))
     } else {
-      sessionStorage.removeItem("shacdn-starting")
-      sessionStorage.removeItem("shacdn-starting-at")
+      sessionStorage.removeItem("mytops-starting")
+      sessionStorage.removeItem("mytops-starting-at")
     }
     setStartingId(id)
   }
@@ -94,7 +94,7 @@ export function App() {
     } catch {
       // best effort
     }
-    localStorage.removeItem("shacdn-active")
+    localStorage.removeItem("mytops-active")
     setWorkspaces([])
     setStatusById({})
     setActiveId(null)
@@ -157,14 +157,14 @@ export function App() {
         // pick the machine each time (an auto-opened iframe that isn't
         // streamReady is exactly the 502 annoyance we fixed).
         setActiveId(null)
-        localStorage.removeItem("shacdn-active")
+        localStorage.removeItem("mytops-active")
         // A launch pinned before a refresh survives and gets dropped once
         // the server list shows the workspace (or after 10 minutes).
-        const pinned = sessionStorage.getItem("shacdn-starting")
-        const pinnedAt = Number(sessionStorage.getItem("shacdn-starting-at") || 0)
+        const pinned = sessionStorage.getItem("mytops-starting")
+        const pinnedAt = Number(sessionStorage.getItem("mytops-starting-at") || 0)
         if (pinned && (!accessible.some((w) => w.id === pinned) || Date.now() - pinnedAt > 10 * 60 * 1000)) {
-          sessionStorage.removeItem("shacdn-starting")
-          sessionStorage.removeItem("shacdn-starting-at")
+          sessionStorage.removeItem("mytops-starting")
+          sessionStorage.removeItem("mytops-starting-at")
           setStartingId(null)
         }
       } catch {
@@ -289,7 +289,7 @@ export function App() {
     // auto-logs-in again via the surviving Keycloak session).
     const rd = encodeURIComponent(`https://apps.${domain}/`)
     const kcLogout = encodeURIComponent(
-      `https://keycloak.${domain}/realms/shacdn/protocol/openid-connect/logout?client_id=webui&post_logout_redirect_uri=${rd}`
+      `https://keycloak.${domain}/realms/mytops/protocol/openid-connect/logout?client_id=webui&post_logout_redirect_uri=${rd}`
     )
     window.location.href = `https://auth.${domain}/oauth2/sign_out?rd=${kcLogout}`
   }
@@ -340,7 +340,7 @@ export function App() {
             <Monitor className="size-4" />
           </span>
           <span className="hidden text-sm font-semibold sm:inline">
-            Shacdn
+            Mytops
           </span>
         </button>
 

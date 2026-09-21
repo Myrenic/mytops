@@ -13,9 +13,9 @@ const GUACAMOLE_PATH = "/guacamole/"
 let catalog = []
 try {
   const { readFileSync } = await import("node:fs")
-  catalog = JSON.parse(readFileSync("/etc/shacdn/catalog.json", "utf8")).apps
+  catalog = JSON.parse(readFileSync("/etc/mytops/catalog.json", "utf8")).apps
 } catch {
-  console.warn("workplace-api: /etc/shacdn/catalog.json not found, catalog empty")
+  console.warn("workplace-api: /etc/mytops/catalog.json not found, catalog empty")
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -87,20 +87,20 @@ function buildDeployment(entry, name, owner) {
       name,
       namespace: NAMESPACE,
       labels: {
-        "app.kubernetes.io/name": "shacdn",
+        "app.kubernetes.io/name": "mytops",
         "app.kubernetes.io/component": "session",
-        "shacdn-owner": owner,
-        "shacdn-entry": entry.id,
-        "shacdn-runtime": entry.runtime ?? "container",
-        "shacdn-persistence": entry.persistence ?? "disposable",
-        "shacdn-lifecycle": entry.lifecycle ?? "ephemeral",
+        "mytops-owner": owner,
+        "mytops-entry": entry.id,
+        "mytops-runtime": entry.runtime ?? "container",
+        "mytops-persistence": entry.persistence ?? "disposable",
+        "mytops-lifecycle": entry.lifecycle ?? "ephemeral",
       },
     },
     spec: {
       replicas: 1,
-      selector: { matchLabels: { "app.kubernetes.io/name": "shacdn", "app.kubernetes.io/component": "session", "shacdn-owner": owner, "shacdn-entry": entry.id } },
+      selector: { matchLabels: { "app.kubernetes.io/name": "mytops", "app.kubernetes.io/component": "session", "mytops-owner": owner, "mytops-entry": entry.id } },
       template: {
-        metadata: { labels: { "app.kubernetes.io/name": "shacdn", "app.kubernetes.io/component": "session", "shacdn-owner": owner, "shacdn-entry": entry.id } },
+        metadata: { labels: { "app.kubernetes.io/name": "mytops", "app.kubernetes.io/component": "session", "mytops-owner": owner, "mytops-entry": entry.id } },
         spec: {
           nodeSelector: nodeSelector(),
           containers: [
@@ -136,10 +136,10 @@ function buildService(name, owner, entryId) {
     metadata: {
       name,
       namespace: NAMESPACE,
-      labels: { "app.kubernetes.io/name": "shacdn", "app.kubernetes.io/component": "session" },
+      labels: { "app.kubernetes.io/name": "mytops", "app.kubernetes.io/component": "session" },
     },
     spec: {
-      selector: { "app.kubernetes.io/name": "shacdn", "app.kubernetes.io/component": "session", "shacdn-owner": owner, "shacdn-entry": entryId },
+      selector: { "app.kubernetes.io/name": "mytops", "app.kubernetes.io/component": "session", "mytops-owner": owner, "mytops-entry": entryId },
       ports: [{ name: "http", port: 3000, targetPort: "http" }],
     },
   }
@@ -231,13 +231,13 @@ function cloudInitUserData() {
     "      sleep 10",
     "    done",
     "    for i in 1 2 3; do",
-    "      apt-get install -y -o Acquire::Retries=5 ca-certificates curl jq >/var/log/shacdn-packages.log 2>&1 && break",
+    "      apt-get install -y -o Acquire::Retries=5 ca-certificates curl jq >/var/log/mytops-packages.log 2>&1 && break",
     "      sleep 30",
     "    done",
     // Docker runtime (jammy has docker.io for the engine; kasm apt repos are not needed).
     "  - |",
     "    for i in 1 2 3; do",
-    "      DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=5 docker.io containerd runc >/var/log/shacdn-docker.log 2>&1 && break",
+    "      DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=5 docker.io containerd runc >/var/log/mytops-docker.log 2>&1 && break",
     "      sleep 30",
     "    done",
     "    systemctl enable --now docker",
@@ -273,10 +273,10 @@ function buildVirtualMachine(entry, name, owner) {
       namespace: VM_NAMESPACE,
       labels: {
         "app.kubernetes.io/name": name,
-        "shacdn-owner": owner,
-        "shacdn-runtime": entry.runtime || "vm-linux",
-        "shacdn-persistence": entry.persistence || "disposable",
-        "shacdn-lifecycle": entry.lifecycle || "ephemeral",
+        "mytops-owner": owner,
+        "mytops-runtime": entry.runtime || "vm-linux",
+        "mytops-persistence": entry.persistence || "disposable",
+        "mytops-lifecycle": entry.lifecycle || "ephemeral",
       },
     },
     spec: {
@@ -414,7 +414,7 @@ async function handleListWorkspaces(req, res, identity) {
   // ── Container workspaces (Deployments in services ns) ────────────
   const depList = await kubeFetch(
     "GET",
-    "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments?labelSelector=shacdn-owner%3D" + slug,
+    "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments?labelSelector=mytops-owner%3D" + slug,
     null,
     req.headers,
   )
@@ -442,7 +442,7 @@ async function handleListWorkspaces(req, res, identity) {
   try {
     const vmList = await kubeFetch(
       "GET",
-      "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines?labelSelector=shacdn-owner%3D" + slug,
+      "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines?labelSelector=mytops-owner%3D" + slug,
       null,
       req.headers,
     )
@@ -450,7 +450,7 @@ async function handleListWorkspaces(req, res, identity) {
   } catch { /* KubeVirt not installed yet */ }
 
   const vmWs = await Promise.all(vmItems
-    .filter((vm) => vm.metadata?.labels?.["shacdn-runtime"]?.startsWith("vm-"))
+    .filter((vm) => vm.metadata?.labels?.["mytops-runtime"]?.startsWith("vm-"))
     .map(async (vm) => {
       const name = vm.metadata.name
       const entryId = name.slice(3, name.length - slug.length - 1)
@@ -671,8 +671,8 @@ async function handleAdminList(req, res, identity) {
     null, req.headers)
   const containers = (sap.items ?? []).map((d) => ({
     name: d.metadata.name,
-    owner: d.metadata.labels?.["shacdn-owner"] ?? "",
-    lifecycle: d.metadata.labels?.["shacdn-lifecycle"] ?? "",
+    owner: d.metadata.labels?.["mytops-owner"] ?? "",
+    lifecycle: d.metadata.labels?.["mytops-lifecycle"] ?? "",
     runtime: "container",
     ready: (d.status?.readyReplicas ?? 0) >= 1,
   }))
@@ -680,11 +680,11 @@ async function handleAdminList(req, res, identity) {
   const vmPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines"
   let vms = []
   try {
-    const vmsList = await kubeFetch("GET", vmPath + "?labelSelector=shacdn-runtime", null, req.headers)
+    const vmsList = await kubeFetch("GET", vmPath + "?labelSelector=mytops-runtime", null, req.headers)
     vms = (vmsList.items ?? []).map((vm) => ({
       name: vm.metadata.name,
-      owner: vm.metadata.labels?.["shacdn-owner"] ?? "",
-      lifecycle: vm.metadata.labels?.["shacdn-lifecycle"] ?? "",
+      owner: vm.metadata.labels?.["mytops-owner"] ?? "",
+      lifecycle: vm.metadata.labels?.["mytops-lifecycle"] ?? "",
       runtime: "vm",
       ready: vm.status?.ready ?? false,
     }))
@@ -722,7 +722,7 @@ async function handleRestartWorkspace(req, res, identity, entryId) {
     spec: {
       template: {
         metadata: {
-          annotations: { "shacdn/restartedAt": new Date().toISOString() },
+          annotations: { "mytops/restartedAt": new Date().toISOString() },
         },
       },
     },

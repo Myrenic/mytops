@@ -5,13 +5,13 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: shacdn-control
+  name: mytops-control
   namespace: services
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: shacdn-control
+  name: mytops-control
   namespace: services
 rules:
   - apiGroups: ["apps"]
@@ -24,15 +24,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: shacdn-control
+  name: mytops-control
   namespace: services
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: shacdn-control
+  name: mytops-control
 subjects:
   - kind: ServiceAccount
-    name: shacdn-control
+    name: mytops-control
     namespace: services
 # NOTE: the network-namespace Role/RoleBinding for ingressroutes lives in
 # kubernetes/apps/network/ingressroutes/control.yaml (this Kustomization has

@@ -7,9 +7,9 @@ resources:
   - ./control.yaml
   - ./nginx.yaml
   - ./api-catalog.yaml
-  - ./shacdn-workplace-api.configmap.json
+  - ./mytops-workplace-api.configmap.json
   - ./idle-culler.yaml
   - ./idle-culler-script.yaml
-  - ./shacdn-turn.yaml
+  - ./mytops-turn.yaml
   - ./coturn.yaml
-  - ./shacdn-webui.configmap.json
+  - ./mytops-webui.configmap.json

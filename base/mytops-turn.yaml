@@ -2,7 +2,7 @@
 #
 # The endpoint is ordinary configuration, so it lives here. The shared secret
 # lives in the common SOPS bundle (apps/common/cluster-secrets.sops.yaml) and is
-# injected at build time by the shacdn Kustomization's postBuild.substituteFrom,
+# injected at build time by the mytops Kustomization's postBuild.substituteFrom,
 # so the value never touches git.
 #
 # Keep the secret non-numeric looking (it is generated as hex, see below). Flux
@@ -18,10 +18,10 @@
 apiVersion: v1
 kind: Secret
 metadata:
-  name: shacdn-turn
+  name: mytops-turn
   namespace: services
   labels:
-    app.kubernetes.io/name: shacdn
+    app.kubernetes.io/name: mytops
     app.kubernetes.io/component: turn
 type: Opaque
 stringData:
