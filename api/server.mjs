@@ -231,6 +231,10 @@ const CONTAINER_FAILURE_REASONS = new Set([
   "RunContainerError",
 ])
 
+// Deliberately without "Stopped": right after a resume (or during a boot) a VM
+// with runStrategy: Always still reports Stopped for a moment, and calling that
+// "offline" would flag a workspace that is coming up. A VM that is halted on
+// purpose is reported as suspended from runStrategy, not from this status.
 const VM_FAILURE_STATES = new Set([
   "CrashLoopBackOff",
   "DataVolumeError",
@@ -240,7 +244,6 @@ const VM_FAILURE_STATES = new Set([
   "ErrorUnschedulable",
   "FailedUnschedulable",
   "ImagePullBackOff",
-  "Stopped",
 ])
 
 function containerWorkspaceStatus(dep) {
