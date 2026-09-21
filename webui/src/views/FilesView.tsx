@@ -51,6 +51,10 @@ const IMAGE = /\.(png|jpe?g|gif|webp|svg|bmp)$/i
  */
 export function FilesView({ owner }: { owner?: string }) {
   const target: FileTarget = owner ? { owner } : {}
+  // Someone else's home is browse-and-download only: the API would accept a
+  // write with the owner flag (it is audited), but an admin page that can
+  // silently edit a user's files is not a thing to hand out by default.
+  const readOnly = !!owner
   const [path, setPath] = useState("/")
   const [listing, setListing] = useState<FileListing | null>(null)
   const [usage, setUsage] = useState<FileUsage | null>(null)
@@ -179,7 +183,9 @@ export function FilesView({ owner }: { owner?: string }) {
               Files{owner ? ` — ${owner}` : ""}
             </h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              {owner ? "Someone else's home volume (read-only actions are yours to choose)." : "Your home volume — the same files your workspaces see."}
+              {readOnly
+                ? "Someone else's home volume — browse and download."
+                : "Your home volume — the same files your workspaces see."}
               {usage && usage.totalBytes > 0 && (
                 <>
                   {" · "}
@@ -191,6 +197,8 @@ export function FilesView({ owner }: { owner?: string }) {
           </div>
           <div className="flex items-center gap-2">
             {busy && <Loader2 className="size-4 animate-spin text-muted-foreground" />}
+            {!readOnly && (
+              <>
             <input
               ref={fileInput}
               type="file"
@@ -209,10 +217,12 @@ export function FilesView({ owner }: { owner?: string }) {
               <FolderPlus className="mr-1.5 size-3.5" />
               New folder
             </Button>
+              </>
+            )}
           </div>
         </div>
 
-        {naming && (
+        {naming && !readOnly && (
           <form
             className="flex items-center gap-2"
             onSubmit={(e) => {
@@ -334,6 +344,8 @@ export function FilesView({ owner }: { owner?: string }) {
                             <Download className="size-3.5" />
                           </a>
                         )}
+                        {!readOnly && (
+                          <>
                         <button
                           type="button"
                           onClick={() => rename(entry)}
@@ -354,6 +366,8 @@ export function FilesView({ owner }: { owner?: string }) {
                         >
                           {armed === entry.name ? <X className="size-3.5" /> : <Trash2 className="size-3.5" />}
                         </button>
+                          </>
+                        )}
                       </span>
                     </li>
                   )
