@@ -14,6 +14,17 @@ export default defineConfig({
       "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
+  // `npm run dev` serves only the SPA; the relative /api calls it makes need a
+  // running workplace API (node ../api/server.mjs) or every request falls
+  // through to index.html and the SPA reports "not signed in".
+  server: {
+    proxy: {
+      "/api": {
+        target: process.env.API_PROXY ?? "http://127.0.0.1:3001",
+        changeOrigin: true,
+      },
+    },
+  },
   build: {
     // Emit straight into the Flux kustomize base so configMapGenerator can
     // bake the files into the served ConfigMap. Flat, deterministic names

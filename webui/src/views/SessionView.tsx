@@ -1,6 +1,7 @@
 import { ExternalLink, Loader2, RotateCw } from "lucide-react"
 import type { Ref } from "react"
 import { Button } from "@/components/ui/button"
+import type { SessionStatus } from "@/lib/workplace"
 
 export interface OverlayState {
   title: string
@@ -17,7 +18,7 @@ interface SessionViewProps {
   instUrl: string
   frameNonce: number
   overlay: OverlayState | null
-  status?: "running" | "starting" | "stopped" | "offline"
+  status?: SessionStatus
   onRestart?: () => void
   containerRef?: Ref<HTMLDivElement>
 }
@@ -33,11 +34,16 @@ export function SessionView({
 }: SessionViewProps) {
   const isStarting = status === "starting"
   const isOffline = status === "offline" || status === "stopped"
+  // The iframe loads while the workspace is still provisioning, so what it
+  // holds is Traefik's 502 (or a login redirect) - a page that never retries
+  // itself. Remounting on every health transition is what turns "Running" in
+  // the tab bar into a desktop on screen.
+  const health = isStarting ? "starting" : isOffline ? "offline" : "running"
 
   return (
     <div ref={containerRef} className="relative min-h-0 flex-1 bg-black">
       <iframe
-        key={`${entry.id}-${frameNonce}`}
+        key={`${entry.id}-${frameNonce}-${health}`}
         src={instUrl}
         title={entry.name}
         className="block h-full w-full border-0"

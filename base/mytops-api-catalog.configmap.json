@@ -1,0 +1,10 @@
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "mytops-api-catalog"
+  },
+  "data": {
+    "catalog.json": "{\n  \"apps\": [\n    {\n      \"id\": \"ubuntu-desktop\",\n      \"name\": \"Ubuntu Desktop\",\n      \"description\": \"Full KDE Plasma desktop (Wayland).\",\n      \"type\": \"desktop\",\n      \"runtime\": \"container\",\n      \"persistence\": \"persistent\",\n      \"lifecycle\": \"suspend\",\n      \"icon\": \"🐧\",\n      \"image\": \"ghcr.io/linuxserver/webtop:ubuntu-kde\",\n      \"resources\": {\n        \"cpu\": \"500m\",\n        \"memory\": \"512Mi\"\n      },\n      \"env\": [\n        {\n          \"name\": \"PIXELFLUX_WAYLAND\",\n          \"value\": \"true\"\n        }\n      ],\n      \"groups\": [\n        \"ubuntu-desktop\"\n      ]\n    },\n    {\n      \"id\": \"firefox\",\n      \"name\": \"Firefox\",\n      \"description\": \"Mozilla Firefox in a single-app container.\",\n      \"type\": \"app\",\n      \"runtime\": \"container\",\n      \"persistence\": \"disposable\",\n      \"lifecycle\": \"ephemeral\",\n      \"icon\": \"🦊\",\n      \"image\": \"ghcr.io/linuxserver/firefox:latest\",\n      \"env\": [\n        {\n          \"name\": \"PIXELFLUX_WAYLAND\",\n          \"value\": \"true\"\n        },\n        {\n          \"name\": \"RESTART_APP\",\n          \"value\": \"true\"\n        }\n      ],\n      \"groups\": [\n        \"firefox\"\n      ]\n    },\n    {\n      \"id\": \"ubuntu-vm\",\n      \"name\": \"Ubuntu VM\",\n      \"description\": \"Full Ubuntu 22.04 VM hosting the LinuxServer Webtop desktop, streamed over the web.\",\n      \"type\": \"desktop\",\n      \"runtime\": \"vm-linux\",\n      \"persistence\": \"persistent\",\n      \"lifecycle\": \"persistent\",\n      \"icon\": \"🖥️\",\n      \"resources\": {\n        \"cpu\": \"2\",\n        \"memory\": \"2Gi\"\n      },\n      \"storage\": \"10Gi\",\n      \"groups\": [\n        \"ubuntu-vm\"\n      ]\n    }\n  ]\n}"
+  }
+}

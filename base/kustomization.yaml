@@ -6,7 +6,7 @@ resources:
   - ./networkpolicy.yaml
   - ./control.yaml
   - ./nginx.yaml
-  - ./api-catalog.yaml
+  - ./mytops-api-catalog.configmap.json
   - ./mytops-workplace-api.configmap.json
   - ./idle-culler.yaml
   - ./idle-culler-script.yaml

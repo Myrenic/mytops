@@ -1,10 +1,9 @@
 // Regenerates base/mytops-webui.configmap.json from the vite output in
-// base/www, and base/mytops-workplace-api.configmap.json from api/server.mjs.
+// base/www, base/mytops-workplace-api.configmap.json from api/server.mjs, and
+// base/mytops-api-catalog.configmap.json from webui/public/catalog.json.
 // The minified JS/CSS are stored as binaryData (base64) because they contain
 // raw control characters that the kustomize/yaml emitter refuses to write as
-// text data. index.html and catalog.json stay as plain data so Flux postBuild
-// substitution can still expand ${SECRET_DOMAIN_0} inside catalog.json (base64
-// content is opaque to it).
+// text data.
 import { readdir, readFile, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
@@ -18,7 +17,7 @@ const binaryData = {}
 const data = {}
 for (const f of files) {
   const content = await readFile(join(www, f))
-  if (f === "index.html" || f === "catalog.json") {
+  if (f === "index.html") {
     data[f] = content.toString("utf8")
   } else {
     binaryData[f] = content.toString("base64")
@@ -45,6 +44,21 @@ const serverSrc = resolve(import.meta.dirname, "../../api/server.mjs")
 const apiOut = join(base, "mytops-workplace-api.configmap.json")
 const serverCode = await readFile(serverSrc, "utf8")
 
+// The API ConfigMap is plain (non-base64) data, so Flux postBuild runs
+// envsubst over it and replaces every $VAR / ${VAR} it finds - with an empty
+// string when the name is unknown, or with a cluster secret's value when it is
+// not. Either way that would rewrite the running API's source. Fail the build
+// rather than ship it.
+const placeholders = serverCode.match(/\$[A-Za-z_{]/g)
+if (placeholders) {
+  throw new Error(
+    `api/server.mjs contains ${placeholders.length} dollar-variable sequence(s) ` +
+      `(${placeholders.slice(0, 5).join(", ")}); Flux postBuild would substitute ` +
+      `them inside the mytops-workplace-api ConfigMap. Build the string with ` +
+      `concatenation instead (this includes comments).`
+  )
+}
+
 const apiConfigMap = {
   apiVersion: "v1",
   kind: "ConfigMap",
@@ -58,3 +72,29 @@ console.log(
     Buffer.byteLength(serverCode) / 1024
   )} KiB)`
 )
+
+// ── Catalog ConfigMap (single source of truth: public/catalog.json) ───
+// The API validates every launch against this catalog (including the group
+// ACL) and serves it to the SPA, so it has to be the same list the SPA ships.
+// Generating it here means the two can no longer drift: an entry added to
+// public/catalog.json reaches the API, which is the only thing that reads it.
+const catalogSrc = join(resolve(import.meta.dirname, ".."), "public", "catalog.json")
+const catalogRaw = await readFile(catalogSrc, "utf8")
+const catalog = JSON.parse(catalogRaw)
+const ids = catalog.apps.map((entry) => entry.id)
+const duplicate = ids.find((id, i) => ids.indexOf(id) !== i)
+if (duplicate) {
+  throw new Error(`public/catalog.json has a duplicate entry id: ${duplicate}`)
+}
+
+const catalogOut = join(base, "mytops-api-catalog.configmap.json")
+const catalogConfigMap = {
+  apiVersion: "v1",
+  kind: "ConfigMap",
+  metadata: { name: "mytops-api-catalog" },
+  data: { "catalog.json": JSON.stringify(catalog, null, 2) },
+}
+
+await writeFile(catalogOut, JSON.stringify(catalogConfigMap, null, 2) + "\n")
+console.log(`wrote ${catalogOut} (${ids.length} catalog entries)`)
+

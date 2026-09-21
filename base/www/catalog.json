@@ -48,7 +48,7 @@
     {
       "id": "ubuntu-vm",
       "name": "Ubuntu VM",
-      "description": "Full Ubuntu 22.04 VM with xfce4 desktop (Selkies WebRTC desktop).",
+      "description": "Full Ubuntu 22.04 VM hosting the LinuxServer Webtop desktop, streamed over the web.",
       "type": "desktop",
       "runtime": "vm-linux",
       "persistence": "persistent",

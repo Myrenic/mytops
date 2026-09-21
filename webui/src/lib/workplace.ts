@@ -21,7 +21,7 @@ export interface Workspace {
   icon?: string
   persistence?: Persistence
   lifecycle?: Lifecycle
-  status: "running" | "starting"
+  status: SessionStatus
   streamReady?: boolean
   url: string
 }
@@ -55,20 +55,52 @@ export interface Me {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, init)
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
-    throw new Error(body.error ?? `HTTP ${res.status}`)
+
+/** Failure of a workplace API call: `status` is the HTTP status (0 if the
+ *  request never got an answer). */
+export class ApiError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
   }
-  return res.json()
 }
 
-// Stable per-user suffix so the same user reuses their instances.
-export function slugFor(email: string): string {
-  let h = 0
-  for (const c of email.toLowerCase()) h = (h * 31 + c.charCodeAt(0)) >>> 0
-  return "u" + (h >>> 0).toString(16).padStart(8, "0")
+/** JSON.parse that reports a parse failure as `undefined` (JSON has no
+ *  `undefined` value, so this cannot collide with a valid body). */
+function parseJsonOrUndefined(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  let res: Response
+  try {
+    res = await fetch(`${API}${path}`, init)
+  } catch (err) {
+    // A dead session is not a network error we can see: oauth2-proxy answers
+    // with a redirect to Keycloak, and the follow-up request to another origin
+    // fails the CORS check, which fetch reports as a TypeError.
+    throw new ApiError(err instanceof Error ? err.message : String(err), 0)
+  }
+
+  const body = parseJsonOrUndefined(await res.text())
+  if (body === undefined) {
+    // Not JSON: an oauth2-proxy/Keycloak HTML page (session gone), or
+    // something other than the workplace API answered.
+    throw new ApiError("not-json", res.status)
+  }
+
+  if (!res.ok) {
+    const message = (body as { error?: string } | null)?.error
+    throw new ApiError(message ?? `HTTP ${res.status}`, res.status)
+  }
+  return body as T
 }
 
 // Derive base domain from the current hostname (strip first component).
@@ -103,8 +135,10 @@ export function createWorkspace(catalogId: string): Promise<Workspace> {
   })
 }
 
-/** Restart a workspace (rolling-restart the Deployment). */
-export function restartWorkspace(catalogId: string): Promise<{ ok: boolean }> {
+/** Restart a workspace (rolling-restart the Deployment / reboot the VM). */
+export function restartWorkspace(
+  catalogId: string
+): Promise<{ ok: boolean; status: SessionStatus }> {
   return apiFetch(`/workspaces/${encodeURIComponent(catalogId)}/restart`, {
     method: "POST",
   })

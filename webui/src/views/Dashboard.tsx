@@ -44,9 +44,9 @@ function statusOf(
   entry: CatalogEntry,
   openIds: string[],
   statusById: Record<string, SessionStatus>,
-  startingId: string | null
+  pendingIds: string[]
 ): SessionStatus {
-  if (startingId === entry.id) return "starting"
+  if (pendingIds.includes(entry.id)) return "starting"
   if (!openIds.includes(entry.id)) return "stopped"
   return statusById[entry.id] ?? "starting"
 }
@@ -67,7 +67,9 @@ function StatusLabel({ status }: { status: SessionStatus }) {
       ? "Running"
       : status === "starting"
         ? "Starting"
-        : "Offline"
+        : status === "offline"
+          ? "Unavailable"
+          : "Offline"
   return (
     <span
       className="flex items-center gap-2 text-xs text-muted-foreground"
@@ -76,7 +78,9 @@ function StatusLabel({ status }: { status: SessionStatus }) {
           ? "Connected and connectable — click Resume to open"
           : status === "starting"
             ? "Provisioning: disk import + cloud-init + container pull, the stream is not reachable yet"
-            : "No workspace for this entry"
+            : status === "offline"
+              ? "The workspace exists but is not running (crash loop, failed boot, or stopped). Restart it."
+              : "No workspace for this entry"
       }
     >
       <StatusDot status={status} />
@@ -89,7 +93,6 @@ interface TileProps {
   entry: CatalogEntry
   status: SessionStatus
   isOpen: boolean
-  streamReady?: boolean
   onConnect: (e: CatalogEntry) => void
   onRestart: (e: CatalogEntry) => void
   onEnd: (id: string) => void
@@ -164,8 +167,9 @@ function Tile({ entry, status, isOpen, onConnect, onRestart, onEnd }: TileProps)
         <Button
           size="icon"
           variant="outline"
+          disabled={!isOpen}
           title={isOpen ? "Restart this workspace with a fresh pod" : "Restart (no running workspace)"}
-          onClick={() => isOpen && onRestart(entry)}
+          onClick={() => onRestart(entry)}
         >
           <RotateCw />
         </Button>
@@ -191,8 +195,8 @@ interface DashboardProps {
   entries: CatalogEntry[]
   openIds: string[]
   statusById: Record<string, SessionStatus>
-  streamReadyById: Record<string, boolean>
-  startingId: string | null
+  /** Launch requests still in flight (the tile shows Starting). */
+  pendingIds: string[]
   query: string
   onQuery: (q: string) => void
   onConnect: (e: CatalogEntry) => void
@@ -206,8 +210,7 @@ export function Dashboard({
   entries,
   openIds,
   statusById,
-  streamReadyById,
-  startingId,
+  pendingIds,
   query,
   onQuery,
   onConnect,
@@ -244,9 +247,8 @@ export function Dashboard({
             <Tile
               key={e.id}
               entry={e}
-              status={statusOf(e, openIds, statusById, startingId)}
+              status={statusOf(e, openIds, statusById, pendingIds)}
               isOpen={openIds.includes(e.id)}
-              streamReady={streamReadyById?.[e.id]}
               onConnect={onConnect}
               onRestart={onRestart}
               onEnd={onEnd}
@@ -286,7 +288,7 @@ export function Dashboard({
       <div className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-8">
         {error && (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            Could not launch workspace: {error}
+            {error}
           </div>
         )}
         {filtered.length === 0 ? (

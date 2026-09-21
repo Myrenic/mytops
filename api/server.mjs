@@ -5,7 +5,16 @@ const KUBE_API = process.env.KUBE_API || "http://localhost:8001"
 const NAMESPACE = process.env.WORKSPACE_NAMESPACE || "services"
 const VM_NAMESPACE = process.env.VM_NAMESPACE || "kubevirt"
 const DOMAIN = process.env.BASE_DOMAIN || ""
-const GUACAMOLE_PATH = "/guacamole/"
+// Longhorn is installed into the namespace its Flux Kustomization targets
+// (`storage`), NOT `longhorn-system`; the storage-namespace RBAC grant in
+// nebula matches this name. Deleting a volume anywhere else is a 403 and
+// leaves the disk behind forever.
+const LONGHORN_NAMESPACE = process.env.LONGHORN_NAMESPACE || "storage"
+const CATALOG_PATH = process.env.CATALOG_PATH || "/etc/mytops/catalog.json"
+// Every Kubernetes call is bounded: an apiserver that accepts a connection and
+// never answers used to hang the HTTP request (and the SPA's Launch/End button)
+// until the client gave up.
+const KUBE_TIMEOUT_MS = Number(process.env.KUBE_TIMEOUT_MS) || 15_000
 
 // ── Catalog ──────────────────────────────────────────────────────────
 // Embedded from catalog.json at build time; the server is the single
@@ -13,29 +22,58 @@ const GUACAMOLE_PATH = "/guacamole/"
 let catalog = []
 try {
   const { readFileSync } = await import("node:fs")
-  catalog = JSON.parse(readFileSync("/etc/mytops/catalog.json", "utf8")).apps
+  catalog = JSON.parse(readFileSync(CATALOG_PATH, "utf8")).apps
 } catch {
-  console.warn("workplace-api: /etc/mytops/catalog.json not found, catalog empty")
+  // NOTE: this file must not contain a dollar-brace placeholder anywhere -
+  // not even inside a comment. It ships as the mytops-workplace-api
+  // ConfigMap's plain (non-base64) data, so Flux postBuild substitutes
+  // dollar-brace sequences before the API ever parses the file, and an
+  // unknown variable fails the whole Kustomization. Concatenate strings.
+  // webui/scripts/build-configmap.mjs fails the build if one appears.
+  console.warn("workplace-api: " + CATALOG_PATH + " not found, catalog empty")
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
 function json(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json" })
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" })
   res.end(JSON.stringify(body))
 }
 
+// POST bodies are a single catalogId; anything larger is a mistake or an
+// attempt to make the API buffer memory.
+const MAX_BODY_BYTES = 64 * 1024
+
 function readBody(req) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const chunks = []
-    req.on("data", (c) => chunks.push(c))
+    let size = 0
+    let overflowed = false
+    req.on("data", (c) => {
+      if (overflowed) return
+      size += c.length
+      if (size > MAX_BODY_BYTES) {
+        // Stop buffering, but let the caller drain the socket: destroying the
+        // request here makes the client see a reset instead of the 413.
+        overflowed = true
+        chunks.length = 0
+        reject(new Error("request body too large"))
+        return
+      }
+      chunks.push(c)
+    })
+    // Without the error/aborted handlers a client that dies mid-upload left
+    // the promise pending forever, holding the request open.
+    req.on("error", reject)
+    req.on("aborted", () => reject(new Error("request aborted")))
     req.on("end", () => {
+      if (overflowed) return
       try { resolve(JSON.parse(Buffer.concat(chunks).toString())) }
       catch { resolve(null) }
     })
   })
 }
 
-// Stable per-user slug (matches SPA slugFor).
+// Stable per-user slug (matches the SPA's workspace naming).
 function slugFor(email) {
   let h = 0
   for (const c of email.toLowerCase()) h = (h * 31 + c.charCodeAt(0)) >>> 0
@@ -46,16 +84,40 @@ function instName(entryId, slug) {
   return "ws-" + entryId + "-" + slug
 }
 
+// entryId back out of an instance name (ws-<entryId>-<slug>).
+function entryIdOf(name, slug) {
+  return name.slice(3, name.length - slug.length - 1)
+}
+
 // Derive base domain from a Host header (strip first component).
 function baseDomain(host) {
-  const parts = host.split(".")
-  return parts.length > 1 ? parts.slice(1).join(".") : host
+  // req.headers.host keeps the port (`localhost:5173` in dev), which would
+  // otherwise end up inside every workspace URL.
+  const bare = host.replace(/:\d+$/, "")
+  const parts = bare.split(".")
+  return parts.length > 1 ? parts.slice(1).join(".") : bare
+}
+
+class KubeError extends Error {
+  constructor(method, path, status, message) {
+    super("kube-api " + method + " " + path + " -> " + status + " " + message)
+    this.name = "KubeError"
+    this.status = status
+  }
+}
+
+function isNotFound(value) {
+  return value?.kind === "Status" && (value.code === 404 || value.reason === "NotFound")
 }
 
 // Forward a request to the kubectl-proxy (localhost:8001).  Only the
 // oauth2-proxy identity headers (X-Auth-Request-*) are forwarded, never the
 // raw incoming headers — passing content-length/host from the browser request
 // makes the fetch hang when the forwarded body size differs.
+//
+// A 404 comes back as a Status object (callers branch on isNotFound); every
+// other failure throws, so a caller can never mistake "the apiserver broke"
+// for "the object does not exist" and take the wrong branch.
 async function kubeFetch(method, path, body, reqHeaders) {
   // PATCH endpoints require a merge-patch content type; everything else is
   // plain JSON (patch-as-json makes the apiserver answer 415).
@@ -67,15 +129,101 @@ async function kubeFetch(method, path, body, reqHeaders) {
   for (const key of Object.keys(reqHeaders)) {
     if (key.toLowerCase().startsWith("x-auth-request-")) headers[key] = reqHeaders[key]
   }
-  const opts = { method, headers }
-  if (body) opts.body = JSON.stringify(body)
-  const res = await fetch(KUBE_API + path, opts)
+  const opts = { method, headers, signal: AbortSignal.timeout(KUBE_TIMEOUT_MS) }
+  if (body !== undefined && body !== null) opts.body = JSON.stringify(body)
+
+  let res
+  try {
+    res = await fetch(KUBE_API + path, opts)
+  } catch (err) {
+    const reason = err?.name === "TimeoutError" ? "timed out after " + KUBE_TIMEOUT_MS + "ms" : String(err?.message ?? err)
+    console.error("kube-api " + method + " " + path + " -> " + reason)
+    throw new KubeError(method, path, 504, reason)
+  }
+
   const text = await res.text()
-  if (!res.ok) console.error("kube-api " + method + " " + path + " -> " + res.status + " " + text.slice(0, 300))
-  try { return JSON.parse(text) } catch { return text }
+  let parsed = null
+  try { parsed = JSON.parse(text) } catch { /* empty body, or HTML from an error page */ }
+
+  if (res.ok) return parsed ?? text
+
+  const message = parsed?.message ?? text.slice(0, 300) ?? res.statusText
+  if (res.status === 404) return { kind: "Status", code: 404, reason: "NotFound", message }
+  console.error("kube-api " + method + " " + path + " -> " + res.status + " " + message)
+  throw new KubeError(method, path, res.status, message)
+}
+
+// Poll a predicate until it holds or the deadline passes. Returns whether it
+// held; never throws (a transient apiserver error is not a terminal answer).
+async function waitFor(predicate, timeoutMs, intervalMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try { if (await predicate()) return true } catch { /* keep polling */ }
+    if (Date.now() >= deadline) return false
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
 }
 
 // ── Manifest builders (server-side, never exposed to browser) ─────────
+
+// TURN for WebRTC media. coturn runs hostNetwork on TURN_HOST because a
+// browser cannot reach a pod IP; the workplace pod is envFrom'd the
+// mytops-turn Secret (see base/webui.yaml), and this is where that config
+// reaches the workspaces. selkies generates the client's ICE config from
+// SELKIES_TURN_* - without it media falls back to candidates the browser
+// cannot use, which is what made VM desktops connect but stay black.
+const TURN_HOST = process.env.TURN_HOST || ""
+const TURN_PORT = process.env.TURN_PORT || "3478"
+const TURN_PROTOCOL = process.env.TURN_PROTOCOL || "udp"
+const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || ""
+
+function turnEnv() {
+  if (!TURN_HOST || !TURN_SHARED_SECRET) return []
+  return [
+    { name: "SELKIES_TURN_HOST", value: TURN_HOST },
+    { name: "SELKIES_TURN_PORT", value: TURN_PORT },
+    { name: "SELKIES_TURN_PROTOCOL", value: TURN_PROTOCOL },
+    { name: "SELKIES_TURN_SHARED_SECRET", value: TURN_SHARED_SECRET },
+  ]
+}
+
+// Failure states, not "still coming up" ones: a crash-looping pod or a VM that
+// cannot schedule must surface as offline so the UI offers Restart instead of
+// spinning "Starting" forever.
+const CONTAINER_FAILURE_REASONS = new Set([
+  "CrashLoopBackOff",
+  "CreateContainerConfigError",
+  "ErrImagePull",
+  "ImagePullBackOff",
+  "InvalidImageName",
+  "RunContainerError",
+])
+
+const VM_FAILURE_STATES = new Set([
+  "CrashLoopBackOff",
+  "DataVolumeError",
+  "ErrImagePull",
+  "ErrorDataVolumeNotFound",
+  "ErrorPvcNotFound",
+  "ErrorUnschedulable",
+  "FailedUnschedulable",
+  "ImagePullBackOff",
+  "Stopped",
+])
+
+function containerWorkspaceStatus(dep) {
+  if ((dep?.status?.readyReplicas ?? 0) >= 1) return "running"
+  const statuses = dep?.status?.containerStatuses ?? []
+  if (statuses.some((c) => CONTAINER_FAILURE_REASONS.has(c.state?.waiting?.reason))) return "offline"
+  return "starting"
+}
+
+function vmWorkspaceStatus(vm, streamReady) {
+  if (vm?.status?.ready && streamReady) return "running"
+  if (VM_FAILURE_STATES.has(vm?.status?.printableStatus)) return "offline"
+  return "starting"
+}
+
 function buildDeployment(entry, name, owner) {
   const cpuReq = entry.resources?.cpu ?? "250m"
   const memReq = entry.resources?.memory ?? "256Mi"
@@ -102,6 +250,9 @@ function buildDeployment(entry, name, owner) {
       template: {
         metadata: { labels: { "app.kubernetes.io/name": "mytops", "app.kubernetes.io/component": "session", "mytops-owner": owner, "mytops-entry": entry.id } },
         spec: {
+          // A workspace is untrusted user content; it has no business holding
+          // a (useless) API token.
+          automountServiceAccountToken: false,
           nodeSelector: nodeSelector(),
           containers: [
             {
@@ -111,9 +262,20 @@ function buildDeployment(entry, name, owner) {
               env: [
                 { name: "PUID", value: "1000" },
                 { name: "PGID", value: "1000" },
+                ...turnEnv(),
                 ...(entry.env ?? []),
               ],
               volumeMounts: [{ name: "dshm", mountPath: "/dev/shm" }],
+              // readyReplicas only means the process is up without this, which
+              // is how a launched workspace reported "Running" while nginx
+              // inside it was still 30 s away and the iframe got a 502.
+              readinessProbe: {
+                tcpSocket: { port: "http" },
+                initialDelaySeconds: 5,
+                periodSeconds: 5,
+                timeoutSeconds: 3,
+                failureThreshold: 30,
+              },
               resources: {
                 requests: { cpu: cpuReq, memory: memReq },
                 limits: { memory: memLim },
@@ -169,21 +331,121 @@ function buildIngressRoute(name, domain, opts) {
   }
 }
 
+// ── Resource reconciliation helpers ──────────────────────────────────
+
+function ingressRoutePath(name) {
+  return "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name
+}
+
+// Reconcile one IngressRoute against the backend this workspace needs.
+//
+// The network-namespace Role grants get/list/create/delete on IngressRoutes -
+// NOT update - so a drifted route is repaired by delete + create. The old
+// PUT-based repair was 403'd by the apiserver on every poll, which is why VM
+// routes created by the container-era code were never actually fixed.
+async function ensureIngressRoute(name, domain, svc, headers) {
+  const path = ingressRoutePath(name)
+  const current = await kubeFetch("GET", path, null, headers).catch(() => null)
+  const backend = current?.spec?.routes?.[0]?.services?.[0]
+  const matches = !!backend && backend.name === svc.name &&
+    (backend.namespace ?? NAMESPACE) === svc.namespace && backend.port === svc.port
+  if (matches) return
+  if (current && !isNotFound(current)) {
+    await kubeFetch("DELETE", path, null, headers)
+      .catch((err) => console.error("ingressroute replace: " + err.message))
+  }
+  await kubeFetch("POST", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
+    buildIngressRoute(name, domain, { svc }), headers)
+}
+
+async function ensureService(namespace, name, build, headers) {
+  const path = "/api/v1/namespaces/" + namespace + "/services/" + name
+  const current = await kubeFetch("GET", path, null, headers).catch(() => null)
+  if (!isNotFound(current)) return
+  await kubeFetch("POST", "/api/v1/namespaces/" + namespace + "/services", build(), headers)
+}
+
+// Tear down one workspace instance. Shared by user destroy and admin destroy
+// so both drop the VM disk and its retained Longhorn volume - admin destroy
+// used to leave a 10Gi ghost per workspace behind.
+// Returns the list of errors; a 404 is not an error (nothing to delete).
+async function teardownWorkspace(name, headers) {
+  const failures = []
+  const del = async (path) => {
+    try {
+      await kubeFetch("DELETE", path, null, headers)
+    } catch (err) {
+      failures.push(err.message)
+      console.error("teardown " + name + ": " + err.message)
+    }
+  }
+
+  // Container resources (services ns) and VM resources (kubevirt ns) share the
+  // instance name, so destroying an entry cleans both without knowing which
+  // runtime it was.
+  await del("/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name)
+  await del("/api/v1/namespaces/" + NAMESPACE + "/services/" + name)
+  await del(ingressRoutePath(name))
+  await del("/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name)
+  await del("/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc")
+  await del("/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit")
+  await del("/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes/" + name)
+
+  // Longhorn's StorageClasses are reclaimPolicy: Retain, so a deleted PVC
+  // leaves the volume object (and its disk) behind. Capture the PV name from
+  // the PVC first, delete the PVC, wait for it to actually go, then drop the
+  // volume. The wait matters: deleting the volume while its PVC still exists
+  // lets the CSI driver recreate it - the old fixed 3 s sleep just moved the
+  // race around instead of closing it.
+  const pvcPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/persistentvolumeclaims/" + name
+  const pvc = await kubeFetch("GET", pvcPath, null, headers).catch(() => null)
+  if (!isNotFound(pvc)) {
+    const pvName = pvc?.spec?.volumeName
+    await del(pvcPath)
+    if (pvName) {
+      const gone = await waitFor(
+        async () => isNotFound(await kubeFetch("GET", pvcPath, null, headers)),
+        20_000,
+        1000,
+      )
+      if (!gone) console.warn("teardown " + name + ": PVC still terminating")
+      await del("/apis/longhorn.io/v1beta2/namespaces/" + LONGHORN_NAMESPACE + "/volumes/" + pvName)
+    }
+  }
+
+  return failures
+}
+
 // ── VM helpers ───────────────────────────────────────────────────────
 
-// Cloud-init user-data for Ubuntu jammy + xfce4 desktop + Selkies-GStreamer
-// (WebRTC remote desktop on :8080). Selkies ships a portable gstreamer>=1.22
-// runtime because jammy's gstreamer 1.20 lacks the GstWebRTC GIR binding.
-// Unit files are written via write_files (heredocs inside runcmd break).
-// Shell variables inside the generated cloud-init text must be escaped with
-// a leading extra dollar sign so the Flux postBuild substitution leaves
-// shell-expansion constructs intact for the guest.
-// User-space runtime for VM workspaces — the EXACT linuxserver/webtop container
-// (baseimage-selkies: selkies + pixelflux/pcmflux + Smithay/Labwc wayland + nginx),
-// run with Docker inside the VM. Same image/env as the container desktops, so
-// behavior (scaling, clipboard, chrome) cannot drift from the SPA tiles.
+// Cloud-init user-data for the Ubuntu jammy VM: Docker from the distro repo,
+// then the linuxserver/webtop container as a systemd unit (see below). The
+// unit file is written via write_files - heredocs inside runcmd break.
+//
+// IMPORTANT: this file ships as plain ConfigMap data, so Flux postBuild runs
+// envsubst over it. envsubst replaces both the braced and the bare form of a
+// variable, with an EMPTY string when the name is unknown, so the generated
+// cloud-init text must not contain a dollar sign at all (the guest shell never
+// sees one - the loops here use `for i in` and `$(...)`-free commands). The
+// idle-culler script is base64-encoded for the same reason.
+//
+// The VM itself is a container host, not the desktop: the EXACT
+// linuxserver/webtop container (baseimage-selkies: selkies + pixelflux/pcmflux
+// + Smithay/Labwc wayland + nginx) runs inside it, same image and env as the
+// container desktops, so their behavior cannot drift from the SPA tiles.
 const WEBTOP_IMAGE = process.env.WEBTOP_IMAGE || "lscr.io/linuxserver/webtop:ubuntu-kde"
 const WEBTOP_ENV = process.env.WEBTOP_ENV || "PIXELFLUX_WAYLAND=true"
+
+// Environment for the in-VM desktop: its own settings plus the TURN config,
+// which selkies turns into the browser's ICE servers. Without it a VM desktop
+// negotiates candidates the browser cannot reach (the VM only has a
+// masquerade'd pod IP), which is what left VM sessions connecting to a black
+// screen while container workspaces, whose pod is reachable, worked.
+function webtopEnvFlags() {
+  const pairs = WEBTOP_ENV.split(" ").filter(Boolean)
+    .concat(turnEnv().map((e) => e.name + "=" + e.value))
+  return pairs.map((kv) => "-e " + kv).join(" ")
+}
 
 function webtopUnit() {
   return [
@@ -197,7 +459,7 @@ function webtopUnit() {
     "RemainAfterExit=yes",
     // Pull retries: registry hiccups shouldn't brick a fresh VM boot.
     "ExecStartPre=-/bin/sh -c 'for i in 1 2 3 4 5; do /usr/bin/docker pull " + WEBTOP_IMAGE + " && break; sleep 20; done'",
-    "ExecStart=/bin/sh -c 'if docker ps --filter name=webtop --filter status=running -q | grep -q .; then exit 0; fi; docker rm -f webtop 2>/dev/null; exec /usr/bin/docker run -d --name webtop --restart unless-stopped --shm-size=1g -p 8080:3000 " + WEBTOP_ENV.split(" ").map((kv) => "-e " + kv).join(" ") + " " + WEBTOP_IMAGE + "'",
+    "ExecStart=/bin/sh -c 'if docker ps --filter name=webtop --filter status=running -q | grep -q .; then exit 0; fi; docker rm -f webtop 2>/dev/null; exec /usr/bin/docker run -d --name webtop --restart unless-stopped --shm-size=1g -p 8080:3000 " + webtopEnvFlags() + " " + WEBTOP_IMAGE + "'",
     "TimeoutStartSec=600",
     "ExecStop=/usr/bin/docker stop webtop",
     "RemainAfterExit=yes",
@@ -241,8 +503,11 @@ function cloudInitUserData() {
     "      sleep 30",
     "    done",
     "    systemctl enable --now docker",
+    // The guest's /config lives on the Longhorn root disk, so a VM desktop
+    // keeps its state across reboots. A container workspace does NOT: it has
+    // no /config volume, so its desktop state is pod-local and dies with the
+    // pod even though the catalog entry says persistence: persistent.
     "  - mkdir -p /home/user/webtop/config && chown -R user:user /home/user/webtop",
-    // VM disk under Longhorn persists /config identical to the containers.
     "  - systemctl daemon-reload",
     "  - systemctl enable webtop.service",
     "  - systemctl start webtop.service",
@@ -423,8 +688,7 @@ async function handleListWorkspaces(req, res, identity) {
     .filter((d) => d.metadata?.name?.startsWith("ws-"))
     .map((d) => {
       const name = d.metadata.name
-      const entryId = name.slice(3, name.length - slug.length - 1)
-      const ready = (d.status?.readyReplicas ?? 0) >= 1
+      const entryId = entryIdOf(name, slug)
       const entry = catalog.find((e) => e.id === entryId)
       return {
         id: entryId,
@@ -432,7 +696,7 @@ async function handleListWorkspaces(req, res, identity) {
         type: entry?.type ?? "desktop",
         runtime: "container",
         icon: entry?.icon,
-        status: ready ? "running" : "starting",
+        status: containerWorkspaceStatus(d),
         url: "https://" + name + "." + domain,
       }
     })
@@ -453,23 +717,19 @@ async function handleListWorkspaces(req, res, identity) {
     .filter((vm) => vm.metadata?.labels?.["mytops-runtime"]?.startsWith("vm-"))
     .map(async (vm) => {
       const name = vm.metadata.name
-      const entryId = name.slice(3, name.length - slug.length - 1)
-      const ready = vm.status?.ready ?? false
+      const entryId = entryIdOf(name, slug)
       const entry = catalog.find((e) => e.id === entryId)
 
       // Self-heal: VM IngressRoutes created by older API code pointed at the
       // container backend (services:3000) — fix whenever we see the drift.
-      const irPath = "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name
-      const ir = await kubeFetch("GET", irPath, null, req.headers).catch(() => null)
-      if (ir && ir.spec?.routes?.[0]?.services?.[0]?.name !== name + "-svc") {
-        await kubeFetch("PUT", irPath, buildIngressRoute(name, domain,
-          { svc: { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 } }), req.headers).catch(() => {})
-      }
+      await ensureIngressRoute(name, domain,
+        { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 }, req.headers)
+        .catch((err) => console.error("workspace " + name + ": " + err.message))
 
       // streamReady: has the VM's web client actually started answering?
       // VMI Ready only means the guest booted; the webtop container inside
       // comes up a couple of minutes later. Probe the guest nginx cluster
-      // service so the UI can show "running (connectable)" vs "booting".
+      // service so the UI can show "starting" until it can actually be used.
       let streamReady = false
       try {
         const r = await fetch("http://" + name + "-svc." + VM_NAMESPACE + ".svc.cluster.local:8080/", {
@@ -484,7 +744,7 @@ async function handleListWorkspaces(req, res, identity) {
         type: entry?.type ?? "desktop",
         runtime: entry?.runtime ?? "vm-linux",
         icon: entry?.icon,
-        status: ready && streamReady ? "running" : "starting",
+        status: vmWorkspaceStatus(vm, streamReady),
         streamReady,
         url: vmWorkspaceUrl(name, domain),
       }
@@ -521,12 +781,19 @@ async function handleCreateWorkspace(req, res, identity) {
 }
 
 // ── Container workspace creation ─────────────────────────────────────
+//
+// Creation returns as soon as the objects exist: the SPA polls
+// /api/workspaces every few seconds and the server list is the source of
+// truth, so blocking the HTTP request until the pod was ready only made
+// Launch hang for minutes behind (and sometimes past) the ingress and browser
+// timeouts, with no way for the client to tell success from a dropped
+// connection.
 async function handleCreateContainerWorkspace(req, res, entry, name, slug, domain) {
   const depPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
   const existing = await kubeFetch("GET", depPath, null, req.headers)
-  if (existing.kind !== "Status") {
+  if (!isNotFound(existing)) {
     return json(res, 200, {
-      id: entry.id, name, status: "running",
+      id: entry.id, name, status: containerWorkspaceStatus(existing),
       url: "https://" + name + "." + domain,
     })
   }
@@ -534,32 +801,8 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
   await kubeFetch("POST", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments",
     buildDeployment(entry, name, slug), req.headers)
 
-  const svcPath = "/api/v1/namespaces/" + NAMESPACE + "/services/" + name
-  const svcExists = await kubeFetch("GET", svcPath, null, req.headers)
-  if (svcExists.kind === "Status") {
-    await kubeFetch("POST", "/api/v1/namespaces/" + NAMESPACE + "/services",
-      buildService(name, slug, entry.id), req.headers)
-  }
-
-  const irExists = await kubeFetch("GET",
-    "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name,
-    null, req.headers)
-  if (irExists.kind === "Status") {
-    await kubeFetch("POST", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
-      buildIngressRoute(name, domain), req.headers)
-  }
-
-  const deadline = Date.now() + 180_000
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 3000))
-    const dep = await kubeFetch("GET", depPath, null, req.headers)
-    if ((dep.status?.readyReplicas ?? 0) >= 1) {
-      return json(res, 200, {
-        id: entry.id, name, status: "running",
-        url: "https://" + name + "." + domain,
-      })
-    }
-  }
+  await ensureService(NAMESPACE, name, () => buildService(name, slug, entry.id), req.headers)
+  await ensureIngressRoute(name, domain, { name, namespace: NAMESPACE, port: 3000 }, req.headers)
 
   json(res, 200, {
     id: entry.id, name, status: "starting",
@@ -571,94 +814,42 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
 async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
   const vmPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name
   const existing = await kubeFetch("GET", vmPath, null, req.headers)
-  if (existing.kind !== "Status") {
+  if (!isNotFound(existing)) {
+    await ensureIngressRoute(name, domain,
+      { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 }, req.headers)
     return json(res, 200, {
-      id: entry.id, name, status: "running", url: vmWorkspaceUrl(name, domain),
+      id: entry.id, name, status: vmWorkspaceStatus(existing, false),
+      url: vmWorkspaceUrl(name, domain),
     })
   }
 
   const secretPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit"
   const secExists = await kubeFetch("GET", secretPath, null, req.headers)
-  if (secExists.kind === "Status") {
-    const sec = await kubeFetch("POST", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets",
+  if (isNotFound(secExists)) {
+    await kubeFetch("POST", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets",
       buildCloudInitSecret(name, cloudInitUserData()), req.headers)
-    if (sec.kind === "Status") {
-      return json(res, 500, { error: "cloud-init secret: " + (sec.message ?? "failed") })
-    }
   }
 
-  const created = await kubeFetch("POST", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines",
+  await kubeFetch("POST", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines",
     buildVirtualMachine(entry, name, slug), req.headers)
-  if (created.kind === "Status") {
-    return json(res, 500, { error: created.message ?? "VM create failed" })
-  }
 
-  const svcPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc"
-  const svcExists = await kubeFetch("GET", svcPath, null, req.headers)
-  if (svcExists.kind === "Status") {
-    await kubeFetch("POST", "/api/v1/namespaces/" + VM_NAMESPACE + "/services",
-      buildVmService(name), req.headers)
-  }
-
-  // Create IngressRoute for the VM workspace (Selkies on :8080).
-  const irPath = "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name
-  const irExists = await kubeFetch("GET", irPath, null, req.headers)
-  if (irExists.kind === "Status") {
-    await kubeFetch("POST", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes",
-      buildIngressRoute(name, domain, { svc: { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 } }), req.headers)
-  } else if (irExists.spec?.routes?.[0]?.services?.[0]?.port === 3000) {
-    // Repair pre-fix VM routes that pointed at the container backend.
-    await kubeFetch("PUT", irPath, buildIngressRoute(name, domain,
-      { svc: { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 } }), req.headers)
-  }
-
-  // Wait for VM readiness (up to 5 min — image import + cloud-init).
-  const deadline = Date.now() + 300_000
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 5000))
-    const vm = await kubeFetch("GET", vmPath, null, req.headers)
-    if (vm.status?.ready) {
-      return json(res, 200, {
-        id: entry.id, name, status: "running", url: vmWorkspaceUrl(name, domain),
-      })
-    }
-  }
+  await ensureService(VM_NAMESPACE, name + "-svc", () => buildVmService(name), req.headers)
+  await ensureIngressRoute(name, domain,
+    { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 }, req.headers)
 
   json(res, 200, {
     id: entry.id, name, status: "starting", url: vmWorkspaceUrl(name, domain),
   })
 }
 
-// DELETE /api/workspaces/:entryId — tear down a workspace.
+// DELETE /api/workspaces/:entryId — tear down a workspace and its disk.
 async function handleDeleteWorkspace(req, res, identity, entryId) {
   const slug = slugFor(identity.email)
   const name = instName(entryId, slug)
-
-  // Best-effort delete container resources.
-  await kubeFetch("DELETE", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name, null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/api/v1/namespaces/" + NAMESPACE + "/services/" + name, null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name, null, req.headers).catch(() => {})
-
-  // Best-effort delete VM resources. Destroying drops the DISK too (the
-  // user asked for persist-until-destroy semantics): without this the
-  // DataVolume/PVC survive and a re-Launch boots the stale disk (pre-
-  // recipe installs keep coming back).
-  await kubeFetch("DELETE", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name, null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc", null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit", null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + name, null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes/" + name, null, req.headers).catch(() => {})
-  // The Longhorn StorageClass retains volumes after PVC delete — capture the
-  // PV name first, then remove the longhorn volume object so no 10Gi ghost
-  // is left behind.
-  const pvc = await kubeFetch("GET", "/api/v1/namespaces/" + VM_NAMESPACE + "/persistentvolumeclaims/" + name, null, req.headers).catch(() => null)
-  const pvName = pvc?.spec?.volumeName
-  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/persistentvolumeclaims/" + name, null, req.headers).catch(() => {})
-  await new Promise((r) => setTimeout(r, 3000))
-  if (pvName) {
-    await kubeFetch("DELETE", "/apis/longhorn.io/v1beta2/namespaces/longhorn-system/volumes/" + pvName, null, req.headers).catch(() => {})
+  const failures = await teardownWorkspace(name, req.headers)
+  if (failures.length) {
+    return json(res, 502, { error: "teardown incomplete: " + failures[0] })
   }
-
   json(res, 200, { ok: true })
 }
 
@@ -693,69 +884,54 @@ async function handleAdminList(req, res, identity) {
   json(res, 200, containers.concat(vms))
 }
 
-// Admin: destroy a workspace by full object name (ws-<entryId>-<slug>). The
-// cloud-init Secret and VM Service use `<name>`-suffixed variants.
+// Admin: destroy a workspace by full object name (ws-<entryId>-<slug>). Same
+// teardown as the user path, so the VM disk and its Longhorn volume go too.
 async function handleAdminDelete(req, res, identity, target) {
   if (!isAdmin(identity)) return json(res, 403, { error: "not admin" })
   if (!/^ws-[a-z0-9-]+$/.test(target)) return json(res, 400, { error: "bad workspace name" })
 
-  await kubeFetch("DELETE", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + target, null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/api/v1/namespaces/" + NAMESPACE + "/services/" + target, null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + target, null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + target + "-svc", null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + target + "-cloudinit", null, req.headers).catch(() => {})
-  await kubeFetch("DELETE", "/apis/traefik.io/v1alpha1/namespaces/network/ingressroutes/" + target, null, req.headers).catch(() => {})
-
+  const failures = await teardownWorkspace(target, req.headers)
+  if (failures.length) {
+    return json(res, 502, { error: "teardown incomplete: " + failures[0] })
+  }
   json(res, 200, { ok: true })
 }
 
 // POST /api/workspaces/:entryId/restart — restart a workspace.
 // Containers: rolling-restart the Deployment. VMs: delete the VMI — with
 // runStrategy: Always KubeVirt boots a fresh instance of the same disk.
+//
+// Like creation, this returns as soon as the restart is under way and leaves
+// the outcome to the poll. Waiting for readiness here answered too early
+// anyway: the old pod (or VMI) is still Ready while the new one starts, so
+// "ok" was reported before anything had actually restarted.
 async function handleRestartWorkspace(req, res, identity, entryId) {
   const slug = slugFor(identity.email)
   const name = instName(entryId, slug)
   const depPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
   const vmiPath = "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachineinstances/" + name
 
-  const patch = {
-    spec: {
-      template: {
-        metadata: {
-          annotations: { "mytops/restartedAt": new Date().toISOString() },
+  const dep = await kubeFetch("GET", depPath, null, req.headers)
+  if (!isNotFound(dep)) {
+    const patch = {
+      spec: {
+        template: {
+          metadata: {
+            annotations: { "mytops/restartedAt": new Date().toISOString() },
+          },
         },
       },
-    },
+    }
+    await kubeFetch("PATCH", depPath, patch, req.headers)
+    return json(res, 200, { ok: true, status: "starting" })
   }
 
-  const result = await kubeFetch("PATCH", depPath, patch, req.headers)
-
-  if (result.kind === "Status" && result.code === 404) {
-    // Not a container workspace — treat as a VM restart.
-    const vmi = await kubeFetch("GET", vmiPath, null, req.headers)
-    if (vmi.kind === "Status") {
-      return json(res, 404, { error: "workspace not found" })
-    }
-    await kubeFetch("DELETE", vmiPath, null, req.headers)
-  } else if (result.kind === "Status") {
-    return json(res, result.code ?? 500, { error: result.message ?? "restart failed" })
-  }
-
-  // Wait for readiness (containers) / the VM to disappear+rebootstrap.
-  const deadline = Date.now() + 180_000
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 3000))
-    const dep = await kubeFetch("GET", depPath, null, req.headers)
-    if ((dep.status?.readyReplicas ?? 0) >= 1) {
-      return json(res, 200, { ok: true })
-    }
-    const vmi = await kubeFetch("GET", vmiPath, null, req.headers)
-    if (vmi.status?.ready) {
-      return json(res, 200, { ok: true })
-    }
-  }
-
-  json(res, 200, { ok: true, note: "still restarting" })
+  // Not a container workspace — treat as a VM restart. Deleting the VMI is
+  // the restart: runStrategy: Always boots a fresh instance of the same disk.
+  const vmi = await kubeFetch("GET", vmiPath, null, req.headers)
+  if (isNotFound(vmi)) return json(res, 404, { error: "workspace not found" })
+  await kubeFetch("DELETE", vmiPath, null, req.headers)
+  json(res, 200, { ok: true, status: "starting" })
 }
 
 // ── Router ───────────────────────────────────────────────────────────
@@ -769,43 +945,75 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://" + (req.headers.host ?? "localhost"))
   const path = url.pathname
 
-  // Extract oauth2-proxy identity headers.
+  // Extract oauth2-proxy identity headers. oauth2-proxy (set-xauthrequest)
+  // strips any client-supplied X-Auth-Request-* header and injects its own,
+  // and every /api route here is behind it - the workspace IngressRoutes carry
+  // the same middleware. A request without an email is therefore either a
+  // probe (/api/health, which the readiness probe uses) or something bypassing
+  // the proxy; without this check every such caller shares the slug for the
+  // empty string and can create and destroy workspaces as that phantom user.
   const identity = {
     email: req.headers["x-auth-request-email"] ?? "",
     groups: req.headers["x-auth-request-groups"] ?? "",
   }
 
+  // NOTE: every handler call is awaited. Handlers are async and a bare
+  // `return handler(...)` inside this try hands the rejection back to the
+  // caller instead of the catch block - an apiserver error would take the
+  // whole process down (and the workspace API with it) instead of answering
+  // 502.
   try {
-    if (path === "/api/health" && req.method === "GET") return handleHealth(req, res)
+    if (path === "/api/health" && req.method === "GET") return await handleHealth(req, res)
+    if (!identity.email) return json(res, 401, { error: "unauthenticated" })
+
     if (path === "/api/me" && req.method === "GET") return json(res, 200, { email: identity.email, groups: identity.groups })
-    if (path === "/api/catalog" && req.method === "GET") return handleCatalog(req, res)
-    if (path === "/api/workspaces" && req.method === "GET") return handleListWorkspaces(req, res, identity)
-    if (path === "/api/workspaces" && req.method === "POST") return handleCreateWorkspace(req, res, identity)
+    if (path === "/api/catalog" && req.method === "GET") return await handleCatalog(req, res)
+    if (path === "/api/workspaces" && req.method === "GET") return await handleListWorkspaces(req, res, identity)
+    if (path === "/api/workspaces" && req.method === "POST") return await handleCreateWorkspace(req, res, identity)
 
     // /api/workspaces/:entryId
     const wsMatch = path.match(/^\/api\/workspaces\/([^/]+)$/)
     if (wsMatch) {
       const entryId = decodeURIComponent(wsMatch[1])
-      if (req.method === "DELETE") return handleDeleteWorkspace(req, res, identity, entryId)
+      if (req.method === "DELETE") return await handleDeleteWorkspace(req, res, identity, entryId)
     }
     // /api/workspaces/:entryId/restart
     const rsMatch = path.match(/^\/api\/workspaces\/([^/]+)\/restart$/)
     if (rsMatch && req.method === "POST") {
-      return handleRestartWorkspace(req, res, identity, decodeURIComponent(rsMatch[1]))
+      return await handleRestartWorkspace(req, res, identity, decodeURIComponent(rsMatch[1]))
     }
 
     // Admin cleanup (ADMIN_GROUPS gate).
-    if (path === "/api/admin/workspaces" && req.method === "GET") return handleAdminList(req, res, identity)
+    if (path === "/api/admin/workspaces" && req.method === "GET") return await handleAdminList(req, res, identity)
     const adminMatch = path.match(/^\/api\/admin\/workspaces\/([^/]+)$/)
-    if (adminMatch && req.method === "DELETE") return handleAdminDelete(req, res, identity, decodeURIComponent(adminMatch[1]))
+    if (adminMatch && req.method === "DELETE") return await handleAdminDelete(req, res, identity, decodeURIComponent(adminMatch[1]))
 
     json(res, 404, { error: "not found" })
   } catch (err) {
+    if (err?.message === "request body too large") {
+      // Drain what is left of the body so the client can read this response
+      // instead of seeing a connection reset.
+      req.resume()
+      return json(res, 413, { error: err.message })
+    }
+    if (err?.message === "request aborted") return
     console.error("workplace-api error:", err)
-    json(res, 500, { error: "internal error" })
+    // KubeError carries the apiserver's status; anything else is ours.
+    const status = err instanceof KubeError ? 502 : 500
+    json(res, status, { error: err?.message ?? "internal error" })
   }
 })
 
+server.on("error", (err) => {
+  console.error("workplace-api: cannot listen on :" + PORT + " - " + err.message)
+  process.exit(1)
+})
+
+// Bind on the pod IP, not loopback: nginx reaches the API over 127.0.0.1, but
+// the kubelet's readiness probe dials the pod IP, so a loopback-only bind
+// leaves the pod permanently NotReady. Reachability is bounded by the webui
+// NetworkPolicy (ingress from the `network` namespace on port 80 only), not by
+// the listen address.
 server.listen(PORT, "0.0.0.0", () => {
   console.log("workplace-api listening on :" + PORT)
 })

@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { useTheme } from "@/components/theme-provider"
 import {
+  ApiError,
   baseDomain,
   createWorkspace,
   endWorkspace as apiEndWorkspace,
@@ -40,21 +41,12 @@ export function App() {
   // Open workspaces (per-user instances) + which one is shown in the frame.
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
-  // Keep launches across refreshes: the provisioning POST is in-flight for
-  // minutes. The tile shows Starting until the server list sees the workspace.
-  const [startingId, setStartingId] = useState<string | null>(() =>
-    sessionStorage.getItem("mytops-starting")
-  )
-  const setStartingPinned = (id: string | null) => {
-    if (id) {
-      sessionStorage.setItem("mytops-starting", id)
-      sessionStorage.setItem("mytops-starting-at", String(Date.now()))
-    } else {
-      sessionStorage.removeItem("mytops-starting")
-      sessionStorage.removeItem("mytops-starting-at")
-    }
-    setStartingId(id)
-  }
+  // Launches that have not answered yet. The POST only creates the objects
+  // (the server used to block for up to 5 minutes), so this is a short-lived
+  // "the click registered" marker - the server list takes over from there.
+  // A list, not a single id: launching two entries at once is allowed and the
+  // second must not erase the first one's "Starting".
+  const [pending, setPending] = useState<string[]>([])
   const [restartingId, setRestartingId] = useState<string | null>(null)
   const [overlay, setOverlay] = useState<OverlayState | null>(null)
   const [statusById, setStatusById] = useState<Record<string, SessionStatus>>(
@@ -111,7 +103,7 @@ export function App() {
         setError(null)
       } catch (err) {
         setError(
-          err instanceof Error && err.message === "not-json"
+          err instanceof ApiError && (err.message === "not-json" || err.status === 401)
             ? "You are not signed in."
             : err instanceof Error
               ? err.message
@@ -124,17 +116,28 @@ export function App() {
   }, [])
 
   // If the session dies mid-use, tear the user's instances down and let
-  // oauth2-proxy bounce us back to the login page.
+  // oauth2-proxy bounce us back to the login page. It takes three consecutive
+  // failures: an expired session shows up as a 401/403 from the API or as a
+  // CORS failure on the Keycloak redirect (indistinguishable from a dropped
+  // connection), and destroying every workspace the user has running because
+  // one poll hit a flaky network is far worse than tearing them down a minute
+  // later.
   useEffect(() => {
     if (!me) return
+    let consecutiveFailures = 0
     const t = setInterval(async () => {
       try {
         await fetchMe()
-      } catch {
-        await teardownAll()
-        window.location.reload()
+        consecutiveFailures = 0
+      } catch (err) {
+        consecutiveFailures += 1
+        const signedOut = err instanceof ApiError && (err.status === 401 || err.status === 403)
+        if (signedOut || consecutiveFailures >= 3) {
+          await teardownAll()
+          window.location.reload()
+        }
       }
-    }, 60000)
+    }, 30000)
     return () => clearInterval(t)
   }, [me])
 
@@ -147,7 +150,7 @@ export function App() {
         const ws = await listWorkspaces()
         const accessible = ws.filter((w) => {
           const entry = entries.find((e) => e.id === w.id)
-          return !entry || canAccess(entry)
+          return !entry || !entry.groups?.length || entry.groups.some((g) => myGroups.has(g))
         })
         setWorkspaces(accessible)
         setStatusById(
@@ -157,45 +160,30 @@ export function App() {
         // pick the machine each time (an auto-opened iframe that isn't
         // streamReady is exactly the 502 annoyance we fixed).
         setActiveId(null)
-        localStorage.removeItem("mytops-active")
-        // A launch pinned before a refresh survives and gets dropped once
-        // the server list shows the workspace (or after 10 minutes).
-        const pinned = sessionStorage.getItem("mytops-starting")
-        const pinnedAt = Number(sessionStorage.getItem("mytops-starting-at") || 0)
-        if (pinned && (!accessible.some((w) => w.id === pinned) || Date.now() - pinnedAt > 10 * 60 * 1000)) {
-          sessionStorage.removeItem("mytops-starting")
-          sessionStorage.removeItem("mytops-starting-at")
-          setStartingId(null)
-        }
       } catch {
         // not fatal: start with an empty top bar
       }
     })()
-  }, [me, entries])
+  }, [me, entries, myGroups])
 
   // Poll the live status of open workspaces so tiles/tabs reflect reality
-  // (e.g. a pod that died or finished restarting) without a page reload —
-  // AND always, so a page loaded mid-provisioning picks up the workspace.
-  // The server list is the source of truth.
+  // (a pod that died, a workspace that finished provisioning or was
+  // terminated) without a page reload. The server list is the source of
+  // truth, so entries are replaced wholesale rather than only having their
+  // status refreshed - streamReady and the URL change too.
   useEffect(() => {
     if (!me) return
     const poll = async () => {
       try {
         const ws = await listWorkspaces()
-        const wsById = new Map(ws.map((w) => [w.id, w]))
-        // Merge: existing → update status; new → add; ghosts → drop.
         setWorkspaces((prev) => {
-          const dead = prev.filter((w) => !wsById.has(w.id))
-          const added = ws.filter((w) => !prev.some((p) => p.id === w.id))
-          if (dead.length) {
-            // A workspace vanished externally — keep semantics of the old
-            // code: drop ghost tabs.
+          const gone = prev.filter((w) => !ws.some((s) => s.id === w.id))
+          if (gone.length) {
             setActiveId((prevActive) =>
-              prevActive && dead.some((d) => d.id === prevActive) ? null : prevActive
+              prevActive && gone.some((d) => d.id === prevActive) ? null : prevActive
             )
           }
-          if (!dead.length && !added.length) return prev
-          return [...prev.filter((w) => !dead.some((d) => d.id === w.id)), ...added]
+          return ws.map((w) => ({ ...w, icon: w.icon ?? prev.find((p) => p.id === w.id)?.icon }))
         })
         setStatusById(Object.fromEntries(ws.map((w) => [w.id, w.status])))
       } catch {
@@ -213,29 +201,20 @@ export function App() {
   }
 
   const connect = async (e: CatalogEntry) => {
-    setStartingPinned(e.id)
+    setPending((prev) => (prev.includes(e.id) ? prev : [...prev, e.id]))
     setError(null)
-    const isVm = e.runtime === "vm-linux" || e.runtime === "vm-windows"
-    setOverlay({
-      title: `Starting ${e.name}…`,
-      detail: isVm
-        ? "Booting VM: disk import, cloud-init, container pull (~2-5 min first time)."
-        : "Pulling image and provisioning container (~30-60 s).",
-    })
     try {
       const ws = await createWorkspace(e.id)
-
       setWorkspaces((prev) =>
         prev.some((w) => w.id === e.id) ? prev : [...prev, { ...ws, icon: e.icon }]
       )
       setStatusById((prev) => ({ ...prev, [e.id]: ws.status }))
-      setOverlay(null)
       setActiveId(e.id)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      setOverlay(null)
+      const detail = err instanceof Error ? err.message : String(err)
+      setError(`Could not launch ${e.name}: ${detail}`)
     } finally {
-      setStartingPinned(null)
+      setPending((prev) => prev.filter((id) => id !== e.id))
     }
   }
 
@@ -243,8 +222,14 @@ export function App() {
   const endWorkspace = async (id: string) => {
     try {
       await apiEndWorkspace(id)
-    } catch {
-      // best effort; still drop the tab
+      setError(null)
+    } catch (err) {
+      // The tab still goes away; the poll brings it back if the workspace
+      // really is still there, and the banner says why.
+      setError(
+        `Could not destroy ${id}: ` +
+          (err instanceof Error ? err.message : String(err))
+      )
     }
     const rest = workspaces.filter((w) => w.id !== id)
     setWorkspaces(rest)
@@ -268,15 +253,19 @@ export function App() {
         : "Re-pulling image and starting a fresh pod (~30-60 s).",
     })
     try {
-      await apiRestartWorkspace(e.id)
+      const res = await apiRestartWorkspace(e.id)
+      // Remount the iframe so it stops showing the old page, then let the
+      // poll report when the new pod (or VMI) is actually up.
       setFrameNonce((n) => n + 1)
       setOverlay(null)
-      setStatusById((prev) => ({ ...prev, [e.id]: "running" }))
+      setError(null)
+      setStatusById((prev) => ({ ...prev, [e.id]: res.status }))
     } catch (err) {
-      setOverlay({
-        title: "Restart failed",
-        detail: err instanceof Error ? err.message : String(err),
-      })
+      const detail = err instanceof Error ? err.message : String(err)
+      // The overlay only shows while a session is on screen; restarting from
+      // a catalog tile needs the dashboard's banner to say what happened.
+      setOverlay({ title: "Restart failed", detail })
+      setError(`Could not restart ${e.name}: ${detail}`)
     } finally {
       setRestartingId(null)
     }
@@ -480,8 +469,7 @@ export function App() {
           entries={entries.filter(canAccess)}
           openIds={openIds}
           statusById={statusById}
-          streamReadyById={workspaces.reduce((acc, w) => ({ ...acc, [w.id]: w.streamReady }), {})}
-          startingId={startingId}
+          pendingIds={pending}
           query={query}
           onQuery={setQuery}
           onConnect={connect}

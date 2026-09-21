@@ -63,12 +63,23 @@ spec:
               value: "services"
             - name: CATALOG_PATH
               value: "/etc/mytops/catalog.json"
+            # Where the Longhorn CRs live (the namespace its Flux Kustomization
+            # targets, and where the matching Role in nebula is created). The
+            # API deletes the volume behind a destroyed VM workspace; pointing
+            # it anywhere else leaves a 10Gi ghost per destroyed VM.
+            - name: LONGHORN_NAMESPACE
+              value: "storage"
             # Streaming desktops are frame-latency sensitive; talos-sz9-1vs
             # carries more control-plane churn (etcd, apiserver) and panicked
             # to load 10.6/8 vs 0.9 on talos-45w-c87. Move workspace pods off
             # it while it settles.
             - name: WORKSPACE_NODE
               value: "talos-45w-c87"
+          # TURN_HOST/TURN_PORT/TURN_PROTOCOL/TURN_SHARED_SECRET for coturn.
+          # The API maps them onto the workspaces' SELKIES_TURN_* variables,
+          # which is how the browser gets relay candidates - without them a VM
+          # desktop (masquerade'd pod IP, unreachable from the browser)
+          # negotiates media it can never send.
           envFrom:
             - secretRef:
                 name: mytops-turn
