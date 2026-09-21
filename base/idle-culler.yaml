@@ -31,7 +31,10 @@ spec:
               type: RuntimeDefault
           containers:
             - name: cull
-              image: docker.io/library/alpine:3.20
+              # alpine/k8s instead of plain alpine: the script shells out to
+              # kubectl, which the alpine image does not ship. It also has
+              # /bin/sh, which is all the script needs.
+              image: alpine/k8s:1.36.0
               # The script is base64-encoded in a ConfigMap (binaryData): the
               # chacdn kustomization postBuild envsubst removes unknown shell
               # vars from inline text, which previously corrupted the script
@@ -47,6 +50,11 @@ spec:
                 - name: script
                   mountPath: /etc/cull
                   readOnly: true
+                # readOnlyRootFilesystem is on, so the decoded script needs a
+                # writable place: without this the job died with
+                # "can't create /tmp/cull.sh: Read-only file system" every run.
+                - name: tmp
+                  mountPath: /tmp
               resources:
                 requests:
                   cpu: 5m
@@ -62,3 +70,5 @@ spec:
             - name: script
               configMap:
                 name: chacdn-idle-culler-script
+            - name: tmp
+              emptyDir: {}
