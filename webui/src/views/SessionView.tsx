@@ -33,12 +33,19 @@ export function SessionView({
   containerRef,
 }: SessionViewProps) {
   const isStarting = status === "starting"
+  const isSuspended = status === "suspended"
   const isOffline = status === "offline" || status === "stopped"
   // The iframe loads while the workspace is still provisioning, so what it
   // holds is Traefik's 502 (or a login redirect) - a page that never retries
   // itself. Remounting on every health transition is what turns "Running" in
   // the tab bar into a desktop on screen.
-  const health = isStarting ? "starting" : isOffline ? "offline" : "running"
+  const health = isStarting
+    ? "starting"
+    : isSuspended
+      ? "suspended"
+      : isOffline
+        ? "offline"
+        : "running"
 
   return (
     <div ref={containerRef} className="relative min-h-0 flex-1 bg-black">
@@ -83,6 +90,24 @@ export function SessionView({
                 Waiting for {entry.name} to become ready.
               </p>
             </div>
+          </div>
+        </div>
+      )}
+      {/* Health probe: workspace was stopped to save resources */}
+      {!overlay && isSuspended && (
+        <div className="absolute inset-0 z-10 grid place-items-center bg-background/90">
+          <div className="flex max-w-sm flex-col items-center gap-4 px-6 text-center">
+            <p className="text-sm font-medium">Suspended</p>
+            <p className="text-xs text-muted-foreground">
+              {entry.name} was stopped because it sat unused. Your files are
+              kept - Resume starts it again.
+            </p>
+            {onRestart && (
+              <Button size="sm" onClick={onRestart}>
+                <RotateCw className="mr-1.5 size-3.5" />
+                Resume
+              </Button>
+            )}
           </div>
         </div>
       )}

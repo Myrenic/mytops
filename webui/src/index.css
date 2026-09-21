@@ -146,6 +146,10 @@
   background: oklch(0.8 0.13 85);
   animation: pulse 1.2s ease-in-out infinite;
 }
+.dot-suspended {
+  background: oklch(0.7 0.1 250);
+  box-shadow: 0 0 0 3px oklch(0.7 0.1 250 / 18%);
+}
 .dot-offline {
   background: oklch(0.55 0.05 265);
 }

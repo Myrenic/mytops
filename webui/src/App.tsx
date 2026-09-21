@@ -21,6 +21,7 @@ import {
   fetchMe,
   listWorkspaces,
   restartWorkspace as apiRestartWorkspace,
+  touchWorkspace,
   type CatalogEntry,
   type Me,
   type SessionStatus,
@@ -195,6 +196,21 @@ export function App() {
     return () => clearInterval(t)
   }, [me])
 
+  // Keep the open workspace alive: an entry may declare how long it may sit
+  // unused (idleSuspendMinutes) before the API stops it, and "on screen in my
+  // browser" is the only honest signal for that. Hidden tabs stop beating, so
+  // a desktop left open overnight is suspended by the time you come back.
+  const onScreenId = active?.id ?? null
+  useEffect(() => {
+    if (!me || !onScreenId) return
+    const beat = () => {
+      if (!document.hidden) touchWorkspace(onScreenId).catch(() => {})
+    }
+    beat()
+    const t = setInterval(beat, 30000)
+    return () => clearInterval(t)
+  }, [me, onScreenId])
+
   const select = (id: string | null) => {
     setOverlay(null)
     setActiveId(id)
@@ -343,7 +359,10 @@ export function App() {
             const isActive = w.id === activeId
             const status = statusById[w.id] ?? "starting"
             const dot =
-              status === "running" ? "dot-running" : status === "starting" ? "dot-starting" : "dot-offline"
+              status === "running" ? "dot-running"
+              : status === "starting" ? "dot-starting"
+              : status === "suspended" ? "dot-suspended"
+              : "dot-offline"
             return (
               <div
                 key={w.id}

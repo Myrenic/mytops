@@ -239,6 +239,7 @@ const VM_FAILURE_STATES = new Set([
 ])
 
 function containerWorkspaceStatus(dep) {
+  if (dep?.spec?.replicas === 0) return "suspended"
   if ((dep?.status?.readyReplicas ?? 0) >= 1) return "running"
   const statuses = dep?.status?.containerStatuses ?? []
   if (statuses.some((c) => CONTAINER_FAILURE_REASONS.has(c.state?.waiting?.reason))) return "offline"
@@ -246,6 +247,7 @@ function containerWorkspaceStatus(dep) {
 }
 
 function vmWorkspaceStatus(vm, streamReady) {
+  if (vm?.spec?.runStrategy === "Halted") return "suspended"
   if (vm?.status?.ready && streamReady) return "running"
   if (VM_FAILURE_STATES.has(vm?.status?.printableStatus)) return "offline"
   return "starting"
@@ -860,6 +862,102 @@ function vmWorkspaceUrl(name, domain) {
   return "https://" + name + "." + domain
 }
 
+// ── Idle suspension ──────────────────────────────────────────────────
+//
+// An entry can say how long a workspace may sit unused (`idleSuspendMinutes`
+// in the catalog). Unused means nobody is watching it: the SPA heartbeats the
+// workspace it has on screen (/api/workspaces/:id/touch) and opening a stream
+// counts as activity too. An idle workspace is *stopped*, never destroyed - the
+// home volume is untouched - so picking it up again is a launch, not a rebuild.
+//
+// The activity map lives in this process; the last value is also written to the
+// workspace's `mytops/last-active` annotation so a restart (or the admin page)
+// still has something to go on. A restart can therefore only make us slower to
+// suspend, never suspend something that is in use: an unknown workspace is
+// measured from its annotation, or from its creation time if it has none.
+const activity = new Map() // workspace name -> epoch ms
+const ACTIVITY_ANNOTATION = "mytops/last-active"
+const SUSPENDED_ANNOTATION = "mytops/suspended-at"
+const IDLE_CHECK_MS = Number(process.env.IDLE_CHECK_MS) || 60_000
+// Persisting every heartbeat would be a write per workspace per interval; the
+// in-memory map is the real source and this is only for restarts.
+const ACTIVITY_PERSIST_MS = 5 * 60_000
+
+function idleLimitMs(entry) {
+  const minutes = Number(entry?.idleSuspendMinutes) || 0
+  return minutes > 0 ? minutes * 60_000 : 0
+}
+
+function touchActivity(name) {
+  const now = Date.now()
+  activity.set(name, now)
+  return now
+}
+
+// Resolve "when was this last used" for a workspace we have no live record of.
+function lastActiveFrom(obj) {
+  const stamp = obj.metadata.annotations?.[ACTIVITY_ANNOTATION]
+  const parsed = stamp ? Date.parse(stamp) : NaN
+  return Number.isFinite(parsed) ? parsed : Date.parse(obj.metadata.creationTimestamp)
+}
+
+function workspaceIsSuspended(runtime, obj) {
+  if (runtime === "container") return obj.spec?.replicas === 0
+  return obj.spec?.runStrategy === "Halted"
+}
+
+// Stop/resume one workspace in place. `replicas: 0` and `runStrategy: Halted`
+// are the reversible switch for each runtime; a halted VM keeps its disk, and
+// the home volume stays attached to its keeper either way.
+async function setWorkspaceSuspended(runtime, name, suspended, headers) {
+  const now = new Date().toISOString()
+  if (runtime === "container") {
+    await kubeFetch("PATCH", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name, {
+      metadata: { annotations: { [SUSPENDED_ANNOTATION]: suspended ? now : null, [ACTIVITY_ANNOTATION]: now } },
+      spec: { replicas: suspended ? 0 : 1 },
+    }, headers)
+  } else {
+    await kubeFetch("PATCH", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name, {
+      metadata: { annotations: { [SUSPENDED_ANNOTATION]: suspended ? now : null, [ACTIVITY_ANNOTATION]: now } },
+      spec: { runStrategy: suspended ? "Halted" : "Always" },
+    }, headers)
+  }
+  if (suspended) activity.set(name, Date.now())
+}
+
+// One sweep over every workspace of every user. The API is the only component
+// that knows about activity, and this is a homelab's worth of objects, so a
+// list per interval is cheaper than another controller.
+async function suspendIdleWorkspaces() {
+  try {
+    const [deps, vms] = await Promise.all([
+      kubeFetch("GET", "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments?labelSelector=app.kubernetes.io%2Fcomponent%3Dsession", null, {}),
+      kubeFetch("GET", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines?labelSelector=mytops-runtime", null, {}).catch(() => ({ items: [] })),
+    ])
+    const targets = [
+      ...(deps.items ?? []).map((d) => ({ runtime: "container", obj: d })),
+      ...(vms.items ?? []).map((v) => ({ runtime: "vm", obj: v })),
+    ]
+    const now = Date.now()
+    for (const { runtime, obj } of targets) {
+      const name = obj.metadata?.name
+      if (!name?.startsWith("ws-")) continue
+      if (workspaceIsSuspended(runtime, obj)) continue
+      const slug = obj.metadata.labels?.["mytops-owner"] ?? ""
+      const entry = catalog.find((e) => e.id === entryIdOf(name, slug))
+      const limit = idleLimitMs(entry)
+      if (!limit) continue
+      const last = activity.get(name) ?? lastActiveFrom(obj)
+      if (now - last < limit) continue
+      console.log("idle: suspending " + name + " (idle " + Math.round((now - last) / 60_000) + "m, limit " + limit / 60_000 + "m)")
+      await setWorkspaceSuspended(runtime, name, true, {})
+        .catch((err) => console.error("idle: could not suspend " + name + ": " + err.message))
+    }
+  } catch (err) {
+    console.error("idle sweep failed: " + err.message)
+  }
+}
+
 // ── Route handlers ───────────────────────────────────────────────────
 
 // Admin group gate (X-Auth-Request-Groups from oauth2-proxy).
@@ -912,7 +1010,12 @@ async function handleStreamAuth(req, res, identity) {
   }
 
   const ownsHost = label.startsWith("ws-") && label.endsWith("-" + slugFor(email))
-  if (ownsHost || isAdmin({ groups })) return json(res, 200, { ok: true })
+  if (ownsHost || isAdmin({ groups })) {
+    // Opening a stream is the strongest "in use" signal there is, so it keeps
+    // an idle-suspend entry alive even if the SPA is not the one asking.
+    if (ownsHost) touchActivity(label)
+    return json(res, 200, { ok: true })
+  }
 
   console.warn("stream-auth: " + email + " denied for " + host)
   json(res, 403, { error: "not your workspace" })
@@ -926,6 +1029,15 @@ function handleHealth(_req, res) {
 // GET /api/catalog
 function handleCatalog(_req, res) {
   json(res, 200, { apps: catalog })
+}
+
+// POST /api/workspaces/:entryId/touch — "this workspace is on my screen".
+// The SPA sends it while a workspace is the open tab; together with the stream
+// check it is what keeps an idle-suspend entry alive.
+async function handleTouchWorkspace(req, res, identity, entryId) {
+  const name = instName(entryId, slugFor(identity.email))
+  const now = touchActivity(name)
+  json(res, 200, { ok: true, lastActiveAt: now })
 }
 
 // GET /api/workspaces — list running workspaces for the caller.
@@ -959,6 +1071,7 @@ async function handleListWorkspaces(req, res, identity) {
         runtime: "container",
         icon: entry?.icon,
         status: containerWorkspaceStatus(d),
+        lastActiveAt: activity.get(name) ?? lastActiveFrom(d),
         url: "https://" + name + "." + domain,
       }
     }))
@@ -1008,6 +1121,7 @@ async function handleListWorkspaces(req, res, identity) {
         icon: entry?.icon,
         status: vmWorkspaceStatus(vm, streamReady),
         streamReady,
+        lastActiveAt: activity.get(name) ?? lastActiveFrom(vm),
         url: vmWorkspaceUrl(name, domain),
       }
     })
@@ -1054,6 +1168,15 @@ async function handleCreateContainerWorkspace(req, res, entry, name, slug, domai
   const depPath = "/apis/apps/v1/namespaces/" + NAMESPACE + "/deployments/" + name
   const existing = await kubeFetch("GET", depPath, null, req.headers)
   if (!isNotFound(existing)) {
+    // Launch is "make sure this is running": a suspended workspace is started
+    // again rather than left as it is.
+    if (existing.spec?.replicas === 0) {
+      await setWorkspaceSuspended("container", name, false, req.headers)
+      return json(res, 200, {
+        id: entry.id, name, status: "starting",
+        url: "https://" + name + "." + domain,
+      })
+    }
     return json(res, 200, {
       id: entry.id, name, status: containerWorkspaceStatus(existing),
       url: "https://" + name + "." + domain,
@@ -1082,6 +1205,13 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain) {
   if (!isNotFound(existing)) {
     await ensureIngressRoute(name, domain,
       { name: name + "-svc", namespace: VM_NAMESPACE, port: 8080 }, req.headers)
+    if (existing.spec?.runStrategy === "Halted") {
+      await setWorkspaceSuspended("vm", name, false, req.headers)
+      return json(res, 200, {
+        id: entry.id, name, status: "starting",
+        url: vmWorkspaceUrl(name, domain),
+      })
+    }
     return json(res, 200, {
       id: entry.id, name, status: vmWorkspaceStatus(existing, false),
       url: vmWorkspaceUrl(name, domain),
@@ -1192,6 +1322,12 @@ async function handleRestartWorkspace(req, res, identity, entryId) {
 
   const dep = await kubeFetch("GET", depPath, null, req.headers)
   if (!isNotFound(dep)) {
+    // Restarting something that is suspended just means starting it; there is
+    // no pod to roll.
+    if (dep.spec?.replicas === 0) {
+      await setWorkspaceSuspended("container", name, false, req.headers)
+      return json(res, 200, { ok: true, status: "starting" })
+    }
     const patch = {
       spec: {
         template: {
@@ -1207,6 +1343,12 @@ async function handleRestartWorkspace(req, res, identity, entryId) {
 
   // Not a container workspace — treat as a VM restart. Deleting the VMI is
   // the restart: runStrategy: Always boots a fresh instance of the same disk.
+  const vm = await kubeFetch("GET", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name, null, req.headers)
+  if (isNotFound(vm)) return json(res, 404, { error: "workspace not found" })
+  if (vm.spec?.runStrategy === "Halted") {
+    await setWorkspaceSuspended("vm", name, false, req.headers)
+    return json(res, 200, { ok: true, status: "starting" })
+  }
   const vmi = await kubeFetch("GET", vmiPath, null, req.headers)
   if (isNotFound(vmi)) return json(res, 404, { error: "workspace not found" })
   await kubeFetch("DELETE", vmiPath, null, req.headers)
@@ -1260,6 +1402,11 @@ const server = createServer(async (req, res) => {
       const entryId = decodeURIComponent(wsMatch[1])
       if (req.method === "DELETE") return await handleDeleteWorkspace(req, res, identity, entryId)
     }
+    // /api/workspaces/:entryId/touch — keep-alive from the SPA
+    const touchMatch = path.match(/^\/api\/workspaces\/([^/]+)\/touch$/)
+    if (touchMatch && req.method === "POST") {
+      return await handleTouchWorkspace(req, res, identity, decodeURIComponent(touchMatch[1]))
+    }
     // /api/workspaces/:entryId/restart
     const rsMatch = path.match(/^\/api\/workspaces\/([^/]+)\/restart$/)
     if (rsMatch && req.method === "POST") {
@@ -1286,6 +1433,12 @@ const server = createServer(async (req, res) => {
     json(res, status, { error: err?.message ?? "internal error" })
   }
 })
+
+// Idle sweep. IDLE_CHECK_MS=0 turns it off (used by the test harness).
+if (IDLE_CHECK_MS > 0) {
+  setInterval(suspendIdleWorkspaces, IDLE_CHECK_MS).unref()
+  console.log("workplace-api: idle sweep every " + IDLE_CHECK_MS + "ms")
+}
 
 server.on("error", (err) => {
   console.error("workplace-api: cannot listen on :" + PORT + " - " + err.message)

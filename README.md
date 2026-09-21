@@ -172,6 +172,18 @@ Two consequences for the API code, both of which it has to respect:
   any user in the realm could open anyone's desktop. The endpoint trusts only
   identity resolved from oauth2-proxy's own headers or from its session cookie -
   never a client-supplied header - and admins pass.
-- The API's kubectl-proxy is reached on `127.0.0.1:8001` (the sidecar binds
-  `--address=127.0.0.1`); do not "simplify" that to `localhost`, which resolves
-  to `::1` first in some images.
+- **Idle workspaces are stopped, not destroyed.** An entry can say how long it
+  may sit unused (`idleSuspendMinutes` in `catalog.json`); the API then stops it
+  in place - `spec.replicas: 0` for a container, `runStrategy: Halted` for a VM -
+  and marks it with `mytops/suspended-at`. The home volume is untouched, so
+  "Resume" is a launch, not a rebuild. Activity means the SPA had the workspace
+  on screen (it heartbeats `/api/workspaces/:id/touch` every 30s while the tab
+  is visible and the document is not hidden) or a stream was opened for it
+  (`/api/stream-auth` counts). A sweep every minute compares each workspace's
+  last activity against its entry's policy; the last value also lands on the
+  workspace as the `mytops/last-active` annotation, so a restart of the API can
+  only make it slower to suspend, never suspend something in use. Entries
+  without the field are never suspended - a compute job you leave running is not
+  "idle" just because nobody is looking at it.
+- The idle sweep is off when `IDLE_CHECK_MS=0` (the test harness runs it at
+  300ms with a fractional policy to exercise the decision).

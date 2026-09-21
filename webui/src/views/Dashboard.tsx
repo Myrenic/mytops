@@ -57,7 +57,9 @@ function StatusDot({ status }: { status: SessionStatus }) {
       ? "dot-running"
       : status === "starting"
         ? "dot-starting"
-        : "dot-offline"
+        : status === "suspended"
+          ? "dot-suspended"
+          : "dot-offline"
   return <span className={`inline-block size-2 shrink-0 rounded-full ${cls}`} />
 }
 
@@ -67,9 +69,11 @@ function StatusLabel({ status }: { status: SessionStatus }) {
       ? "Running"
       : status === "starting"
         ? "Starting"
-        : status === "offline"
-          ? "Unavailable"
-          : "Offline"
+        : status === "suspended"
+          ? "Suspended"
+          : status === "offline"
+            ? "Unavailable"
+            : "Offline"
   return (
     <span
       className="flex items-center gap-2 text-xs text-muted-foreground"
@@ -78,9 +82,11 @@ function StatusLabel({ status }: { status: SessionStatus }) {
           ? "Connected and connectable — click Resume to open"
           : status === "starting"
             ? "Provisioning: disk import + cloud-init + container pull, the stream is not reachable yet"
-            : status === "offline"
-              ? "The workspace exists but is not running (crash loop, failed boot, or stopped). Restart it."
-              : "No workspace for this entry"
+            : status === "suspended"
+              ? "Stopped because it sat unused. Your files are kept - Resume starts it again."
+              : status === "offline"
+                ? "The workspace exists but is not running (crash loop, failed boot, or stopped). Restart it."
+                : "No workspace for this entry"
       }
     >
       <StatusDot status={status} />

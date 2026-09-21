@@ -11,7 +11,7 @@ export type EntryType = "desktop" | "app"
 export type Runtime = "container" | "vm-linux" | "vm-windows"
 export type Persistence = "disposable" | "persistent"
 export type Lifecycle = "ephemeral" | "suspend" | "persistent"
-export type SessionStatus = "running" | "starting" | "stopped" | "offline"
+export type SessionStatus = "running" | "starting" | "stopped" | "offline" | "suspended"
 
 export interface Workspace {
   id: string
@@ -23,6 +23,8 @@ export interface Workspace {
   lifecycle?: Lifecycle
   status: SessionStatus
   streamReady?: boolean
+  /** Epoch ms of the last heartbeat/stream open; absent for old objects. */
+  lastActiveAt?: number
   url: string
 }
 
@@ -49,6 +51,8 @@ export interface CatalogEntry {
   storage?: string
   /** Size of the per-user home volume this entry mounts (persistent entries). */
   homeStorage?: string
+  /** Minutes a workspace may sit unused before it is stopped (0/absent = never). */
+  idleSuspendMinutes?: number
 }
 
 export interface Me {
@@ -134,6 +138,13 @@ export function createWorkspace(catalogId: string): Promise<Workspace> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ catalogId }),
+  })
+}
+
+/** Tell the API a workspace is on screen, so it is not suspended as idle. */
+export function touchWorkspace(catalogId: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/workspaces/${encodeURIComponent(catalogId)}/touch`, {
+    method: "POST",
   })
 }
 

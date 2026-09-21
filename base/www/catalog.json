@@ -23,7 +23,8 @@
       "groups": [
         "ubuntu-desktop"
       ],
-      "homeStorage": "20Gi"
+      "homeStorage": "20Gi",
+      "idleSuspendMinutes": 60
     },
     {
       "id": "firefox",
@@ -47,7 +48,8 @@
       ],
       "groups": [
         "firefox"
-      ]
+      ],
+      "idleSuspendMinutes": 30
     },
     {
       "id": "ubuntu-vm",
@@ -66,7 +68,8 @@
       "homeStorage": "20Gi",
       "groups": [
         "ubuntu-vm"
-      ]
+      ],
+      "idleSuspendMinutes": 60
     }
   ]
 }

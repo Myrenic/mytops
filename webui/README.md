@@ -43,7 +43,8 @@ An entry needs `id`, `name`, `type` (`desktop`/`app`), an optional
 `icon`/`description`, and for containers an `image`. Optional: `runtime`
 (`container` or `vm-linux`/`vm-windows`), `persistence`, `lifecycle`,
 `resources` (`cpu`/`memory`), `storage` (VM root disk size), `homeStorage`
-(size of the user's home volume) and `env`. An entry with no `groups` is
+(size of the user's home volume), `idleSuspendMinutes` (stop it when it sits
+unused, see below) and `env`. An entry with no `groups` is
 visible to everyone signed in; otherwise the launch is gated on one of those
 Keycloak groups.
 
@@ -59,6 +60,16 @@ workspace: a container workspace mounts the PVC directly, and a VM's guest
 mounts the same volume over NFS. Destroying a workspace keeps the home volume -
 that is the point of it - so a `storage`/`homeStorage` bump is the only place
 sizes appear, and clearing a user's data is a deliberate manual act.
+
+### Idle suspension
+
+`idleSuspendMinutes` is how long a workspace may sit unused before the API stops
+it - `replicas: 0` for a container, `runStrategy: Halted` for a VM - leaving the
+home volume alone, so Resume is a launch and not a rebuild. The SPA heartbeats
+the workspace it has on screen (every 30s, only while the tab is visible) and
+opening a stream counts too. Entries without the field are never suspended:
+something you leave computing is not idle just because nobody is watching it.
+The catalog sets 60 minutes for the desktops and 30 for the throwaway browser.
 
 ## Local dev
 
