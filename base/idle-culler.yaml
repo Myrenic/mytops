@@ -34,7 +34,7 @@ spec:
               # alpine/k8s instead of plain alpine: the script shells out to
               # kubectl, which the alpine image does not ship. It also has
               # /bin/sh, which is all the script needs.
-              image: alpine/k8s:1.36.0
+              image: alpine/k8s:1.37.0
               # The script lives in the ConfigMap's binaryData (base64), which
               # is opaque to the mytops kustomization's postBuild envsubst -
               # inline text in ConfigMap data had its ${VAR} shell variables
