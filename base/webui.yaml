@@ -16,7 +16,7 @@ spec:
       serviceAccountName: mytops-control
       containers:
         - name: webui
-          image: nginx:1.27-alpine
+          image: nginx:1.31-alpine
           ports:
             - name: http
               containerPort: 80
