@@ -1,0 +1,20 @@
+{
+  "id": "nixos-desktop",
+  "name": "NixOS Desktop",
+  "description": "Full XFCE desktop on a NixOS image built by the bouwstraat. Reproducible from a pinned revision, digest-pinned in the catalog, and self-verifying against the hardening register.",
+  "type": "desktop",
+  "runtime": "vm-nixos",
+  "persistence": "persistent",
+  "lifecycle": "suspend",
+  "icon": "❄️",
+  "resources": {
+    "cpu": "2",
+    "memory": "2Gi"
+  },
+  "storage": "12Gi",
+  "homeStorage": "20Gi",
+  "groups": [
+    "nixos-desktop"
+  ],
+  "idleSuspendMinutes": 60
+}

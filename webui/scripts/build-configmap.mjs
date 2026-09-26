@@ -137,6 +137,22 @@ if (duplicate) {
   throw new Error(`public/catalog.json has a duplicate entry id: ${duplicate}`)
 }
 
+// A bouwstraat image is referenced by digest, never by tag. This is the only
+// build-time gate between a `docker push` somewhere else and every workspace
+// that entry launches, so it fails the build instead of shipping it. The same
+// rule lives in bouwstraat/scripts/verify-catalog.mjs; keeping it here too means
+// a hand-edited catalog cannot reach the cluster merely because nobody ran the
+// bouwstraat script.
+for (const entry of catalog.apps) {
+  const isVm = typeof entry.runtime === "string" && entry.runtime.startsWith("vm-")
+  if (isVm && entry.image && !/@sha256:[0-9a-f]{64}$/.test(entry.image)) {
+    throw new Error(
+      `public/catalog.json: ${entry.id} has an unpinned vm image (${entry.image}); ` +
+        "run bouwstraat/scripts/bouwstraat.sh pin",
+    )
+  }
+}
+
 const catalogOut = join(base, "mytops-api-catalog.configmap.json")
 const catalogConfigMap = {
   apiVersion: "v1",

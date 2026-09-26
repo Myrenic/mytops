@@ -18,6 +18,7 @@ oauth2-proxy, Longhorn, cert-manager, the `apps.<domain>` IngressRoute, the
 | `webui/` | Vite + React SPA source; builds into `base/www` |
 | `webui/public/catalog.json` | the catalog: the one list of launchable desktops/apps |
 | `api/` | workplace API (`server.mjs`), shipped to the cluster as a ConfigMap |
+| `bouwstraat/` | the NixOS workspace image: flake, hardening register, and the gate/build/promote/pin street |
 | `base/` | Kubernetes manifests - this is what nebula deploys |
 | `base/www/` | built SPA assets (committed on purpose) |
 | `base/*.configmap.json` | generated ConfigMap bundles (committed on purpose) |
@@ -49,6 +50,42 @@ same trap, which is stored base64 for exactly this reason).
 
 `npm run lint` currently reports two pre-existing `react-refresh/only-export-components`
 errors; it is deliberately not part of the gate.
+
+## NixOS workspaces (`bouwstraat/`)
+
+A second VM guest besides `ubuntu-vm`: `runtime: vm-nixos` boots a disk this
+repository builds, not a stock cloud image. Everything that makes the desktop -
+kernel, XFCE, Xvfb/x11vnc/noVNC, the hardening - is one flake built from a pinned
+nixpkgs revision, and the catalog references it by **digest**:
+
+```json
+"runtime": "vm-nixos",
+"image": "registry.example/mytops/desktop-nixos@sha256:...",
+"source": { "flake": "bouwstraat#nixosConfigurations.mytops-vm-desktop", "rev": "<40 hex>" }
+```
+
+The API needs almost nothing new for this: `vmDiskSource(entry)` imports from a
+registry (CDI) when the entry carries an image and falls back to the public cloud
+image when it does not, and `cloudInitUserData` sends a NixOS guest its home
+volume instead of an apt/docker bootstrap. Service, IngressRoute, readiness probe
+and status derivation are unchanged - a NixOS workspace answers on 8080 like
+every other VM.
+
+Build and pin one:
+
+```bash
+bouwstraat/scripts/bouwstraat.sh gate     # every host evaluates + catalog invariants
+bouwstraat/scripts/bouwstraat.sh build
+bouwstraat/scripts/bouwstraat.sh promote  # push + sign, prints the digest
+bouwstraat/scripts/bouwstraat.sh pin      # writes image@digest + source.rev into the catalog
+(cd webui && npm run build)               # regenerate the catalog ConfigMap
+```
+
+`pin` is what makes the entry launchable. `verify-catalog.mjs` refuses a `vm-*`
+entry whose image is not `@sha256:`-pinned, and `build-configmap.mjs` refuses to
+ship one - a tag is a reference somebody else can repoint, and this is the one
+place where that decides what code runs on a user's desktop. See
+`bouwstraat/docs/` for the architecture, the runbook and the pitfalls.
 
 ## Deploy
 
@@ -108,8 +145,12 @@ platform files in nebula:
 
 | Grant | File |
 | --- | --- |
-| create/delete IngressRoutes in `network` | `nebula/kubernetes/apps/network/ingressroutes/control.yaml` |
-| delete `volumes.longhorn.io` in `storage` (VM disk teardown) | `nebula/kubernetes/apps/storage/mytops-rbac.yaml` |
+| create/delete IngressRoutes in `network` | `nebula/kubernetes/apps/mytops-control/network.yaml` |
+| delete `volumes.longhorn.io` in `storage` (VM disk teardown) | `nebula/kubernetes/apps/mytops-control/storage.yaml` |
+| VirtualMachines, DataVolumes and their Secrets/Services/PVCs in `kubevirt` | `nebula/kubernetes/apps/mytops-control/kubevirt.yaml` |
+
+All three live in one directory in nebula (`kubernetes/apps/mytops-control/`, applied
+without a `targetNamespace`) so that one place answers what this API may do.
 
 Two consequences for the API code, both of which it has to respect:
 

@@ -57,6 +57,19 @@ try {
   console.warn("workplace-api: " + CATALOG_PATH + " not found, catalog empty")
 }
 
+// The build refuses to ship a bouwstraat entry whose image is not pinned by
+// digest (webui/scripts/build-configmap.mjs); this is the same rule at runtime,
+// for a catalog that reached the cluster some other way. Warn and keep serving:
+// an API that refuses to start takes down every workspace, including the ones
+// that are fine.
+for (const entry of catalog) {
+  if (isVmRuntime(entry.runtime) && entry.image && !entry.image.includes("@sha256:")) {
+    console.warn(
+      "workplace-api: catalog entry " + entry.id + " references an unpinned image: " + entry.image,
+    )
+  }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 function json(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" })
@@ -734,7 +747,41 @@ function webtopUnit({ homeMount = false } = {}) {
   ].join("\n")
 }
 
-function cloudInitUserData({ homeSource = null } = {}) {
+// Which guest runs this VM. The Ubuntu entry boots a stock cloud image and then
+// installs its desktop through cloud-init; a bouwstraat image already contains
+// the desktop, so its cloud-init only hands over what the image cannot know at
+// build time - this launch's home volume.
+function isNixosVm(entry) {
+  return entry?.runtime === "vm-nixos"
+}
+
+// The guest-side half of the home-volume contract: the API knows the NFS export
+// name only at launch (Longhorn names the share-manager Service after the bound
+// PersistentVolume), so it arrives as a file that the image's own service reads.
+// Nothing else is configured here. Users, desktop and hardening are in the
+// image - which is the point of building one.
+function nixosCloudInitUserData(homeSource) {
+  return [
+    "#cloud-config",
+    "write_files:",
+    "  - path: /run/mytops/home-source",
+    "    permissions: '0644'",
+    "    content: |",
+    "      " + (homeSource ?? ""),
+    "runcmd:",
+    // The unit is ordered after cloud-final anyway; restarting it makes the
+    // mount happen in this boot even when the seed arrives late.
+    "  - systemctl restart mytops-home.service || true",
+  ].join("\n")
+}
+
+function cloudInitUserData({ homeSource = null, entry = null } = {}) {
+  if (isNixosVm(entry)) return nixosCloudInitUserData(homeSource)
+  return ubuntuCloudInitUserData({ homeSource })
+}
+
+// The Ubuntu guest: a stock cloud image that installs its own desktop.
+function ubuntuCloudInitUserData({ homeSource = null } = {}) {
   return [
     "#cloud-config",
     "users:",
@@ -793,6 +840,18 @@ function cloudInitUserData({ homeSource = null } = {}) {
 
 const VM_IMAGE_URL =
   "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+
+// Where the guest disk comes from. An entry that carries an image reference was
+// built by the bouwstraat and is imported from the registry by CDI; an entry
+// without one falls back to the public cloud image, which is why ubuntu-vm
+// works with no build step at all. The catalog decides, not this function - and
+// verify-catalog.mjs is what keeps a bouwstraat entry digest-pinned.
+function vmDiskSource(entry) {
+  if (entry?.image) {
+    return { registry: { url: "docker://" + entry.image } }
+  }
+  return { http: { url: VM_IMAGE_URL } }
+}
 
 // Optional pin: streaming workloads should run on the least-loaded node
 // (control-plane nodes with etcd churn are poor homes for frame-latency
@@ -868,9 +927,7 @@ function buildVirtualMachine(entry, name, owner, ownerEmail) {
         {
           metadata: { name: name },
           spec: {
-            source: {
-              http: { url: VM_IMAGE_URL },
-            },
+            source: vmDiskSource(entry),
             pvc: {
               accessModes: ["ReadWriteOnce"],
               storageClassName: "longhorn",
@@ -1336,7 +1393,7 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain, iden
   const secExists = await kubeFetch("GET", secretPath, null, req.headers)
   if (isNotFound(secExists)) {
     await kubeFetch("POST", "/api/v1/namespaces/" + VM_NAMESPACE + "/secrets",
-      buildCloudInitSecret(name, cloudInitUserData({ homeSource })), req.headers)
+      buildCloudInitSecret(name, cloudInitUserData({ homeSource, entry })), req.headers)
   }
 
   await kubeFetch("POST", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines",

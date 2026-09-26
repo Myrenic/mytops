@@ -31,6 +31,11 @@ jobs:
       - name: Manifests build
         run: kubectl kustomize . >/dev/null
 
+      - name: Catalog invariants
+        # Cheap, so it runs on every change rather than only on bouwstraat ones:
+        # the catalog decides what code runs on a user's desktop.
+        run: node bouwstraat/scripts/verify-catalog.mjs --catalog webui/public/catalog.json
+
       - name: Committed placeholders are placeholders only
         run: |
           set -euo pipefail

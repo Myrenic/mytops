@@ -1,0 +1,13 @@
+# Ignored on purpose: these are outputs of a run, not artifacts.
+#
+# The image path is written by `build` so `promote` cannot silently build
+# something else, and the digest/repository by `promote` so `pin` records what
+# was actually pushed. All three are ephemeral and would be misleading if they
+# were committed - they describe one run on one machine.
+.oci-image-path
+.digest
+.repository
+
+# nix build output symlink.
+result
+result-*

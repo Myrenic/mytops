@@ -1,0 +1,78 @@
+name: Bouwstraat
+
+# The gate. Nothing is built here on purpose: the expensive half runs where the
+# registry credentials live, and this job's job is to refuse a change before it
+# can become an image.
+on:
+  pull_request:
+    paths:
+      - 'bouwstraat/**'
+      - 'webui/public/catalog.json'
+      - 'webui/scripts/build-configmap.mjs'
+      - 'api/server.mjs'
+  push:
+    branches: [main]
+    paths:
+      - 'bouwstraat/**'
+      - 'webui/public/catalog.json'
+      - 'webui/scripts/build-configmap.mjs'
+      - 'api/server.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bouwstraat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Catalog invariants
+        run: node bouwstraat/scripts/verify-catalog.mjs --catalog webui/public/catalog.json
+
+      - name: Bouwstraat tooling
+        run: bash bouwstraat/tests/bouwstraat.test.sh
+
+  gate:
+    runs-on: ubuntu-latest
+    needs: catalog
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Every host evaluates
+        working-directory: bouwstraat
+        run: |
+          set -euo pipefail
+          hosts=$(nix eval --json .#nixosConfigurations --apply builtins.attrNames)
+          for host in $(printf '%s' "$hosts" | jq -r '.[]'); do
+            # Forcing the toplevel derivation is what runs the module system and
+            # every assertion in it. A green CI over a core that no longer
+            # evaluates is the failure this step exists for: it is invisible
+            # locally when the runner's store already holds the paths.
+            nix eval --raw ".#nixosConfigurations.$host.config.system.build.toplevel.drvPath" >/dev/null
+            echo "ok: $host evaluates"
+          done
+
+      - name: Hardening register is wired
+        working-directory: bouwstraat
+        run: |
+          set -euo pipefail
+          # A register with no rules means the register was not found or not
+          # read, which is exactly the kind of quiet success the gate is for.
+          count=$(nix eval --json .#nixosConfigurations.mytops-vm-desktop.config.mytops.hardening.activeRuleIds \
+            --apply 'ids: builtins.length ids')
+          echo "active rules: $count"
+          test "$count" -gt 0
