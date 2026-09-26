@@ -58,44 +58,71 @@ spec:
               # step needs it; sandbox=false because a pod has no user namespace
               # for the nix sandbox, and the VM the image build boots is already
               # the isolation that matters here.
+              #
+              # max-jobs: nix defaults to 1. That default is what made this job
+              # take minutes longer than it had to on a 12-core node - the
+              # closure, the initrd and the disk image are separate derivations
+              # and nix built them one at a time. `auto` is "as many as there are
+              # cores", which is what the 4-CPU request below was sized for.
               export NIX_CONFIG='experimental-features = nix-command flakes
               system-features = benchmark big-parallel nixos-test kvm
-              sandbox = false'
-
-              # Only skopeo: the nixos/nix image already provides git and a CA
-              # bundle in its profile, and `nix profile install git` fails with a
-              # file conflict against that git-minimal before anything is built.
-              nix profile install nixpkgs#skopeo
-
-              # skopeo refuses to run without a container signature policy, and
-              # an image build has nothing to verify against. Registry TLS is
-              # unaffected; this only says "do not check signatures".
-              mkdir -p /etc/containers
-              printf '%s\n' '{"default":[{"type":"insecureAcceptAnything"}]}' \
-                > /etc/containers/policy.json
+              sandbox = false
+              max-jobs = auto'
 
               git clone --quiet https://github.com/Myrenic/mytops /work/mytops
               cd /work/mytops
               git checkout --quiet "$REV"
               cd bouwstraat
 
+              # skopeo is only needed for the registry push. Installing it costs
+              # a nixpkgs-unstable fetch and an evaluation of that channel, which
+              # is pure overhead in disk mode - the mode this cluster uses.
+              if [ "$PUSH_REGISTRY" = "1" ]; then
+                # Only skopeo: the nixos/nix image already provides git and a CA
+                # bundle in its profile, and `nix profile install git` fails with a
+                # file conflict against that git-minimal before anything is built.
+                nix profile install nixpkgs#skopeo
+
+                # skopeo refuses to run without a container signature policy, and
+                # an image build has nothing to verify against. Registry TLS is
+                # unaffected; this only says "do not check signatures".
+                mkdir -p /etc/containers
+                printf '%s\n' '{"default":[{"type":"insecureAcceptAnything"}]}' \
+                  > /etc/containers/policy.json
+              fi
+
               nix build --no-link --print-out-paths .#packages.x86_64-linux.qcow2 | tee /work/qcow2.path
-              nix build --no-link --print-out-paths .#packages.x86_64-linux.ociImage | tee /work/oci.path
+
+              # No registry push, no OCI image: that artifact repackages the same
+              # multi-GB disk as a container layer, which is minutes of compressing
+              # an image nothing imports. Disk mode pins the qcow2's checksum and
+              # serves it from the cluster instead (see docs/bouwstraat.md).
+              if [ "$PUSH_REGISTRY" = "1" ]; then
+                nix build --no-link --print-out-paths .#packages.x86_64-linux.ociImage | tee /work/oci.path
+              fi
 
               # ---- install the disk into the image store -------------------
               mkdir -p /images
-              cp "$(cat /work/qcow2.path)/nixos.qcow2" /images/disk.qcow2
+              # Hash the disk while it is being written, not after: the write
+              # already crosses into the RWX image store's share-manager, and
+              # reading the same 4+ GB back out of it to checksum was a second
+              # trip over the network for a number the write already had. The
+              # temp name keeps a half-written disk from ever being served.
+              cat "$(cat /work/qcow2.path)/nixos.qcow2" \
+                | tee /images/disk.qcow2.tmp \
+                | sha256sum > /work/disk.sha256
+              mv /images/disk.qcow2.tmp /images/disk.qcow2
               # nginx runs as uid 101 and must be able to read it.
               chmod 0644 /images/disk.qcow2
               chmod 0755 /images
               sync
 
               echo "installed-bytes: $(stat -c %s /images/disk.qcow2)"
-              # The checksum is taken from the copy on the volume, not from the
-              # build output: what the catalog pins has to be what the importer
-              # reads.
-              sha256sum /images/disk.qcow2 | tee /images/disk.qcow2.sha256
-              echo "GOLDEN-DISK-SHA256 $(cut -d' ' -f1 /images/disk.qcow2.sha256)"
+              # The checksum is the checksum of the copy on the volume - it is
+              # taken from the bytes that were just written there - because what
+              # the catalog pins has to be what the importer reads.
+              cp /work/disk.sha256 /images/disk.qcow2.sha256
+              echo "GOLDEN-DISK-SHA256 $(cut -d' ' -f1 /work/disk.sha256)"
               echo "GOLDEN-DISK-REV $REV"
               echo "BOUWSTRAAT-READY"
 
