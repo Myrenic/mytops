@@ -21,6 +21,22 @@ in
   };
 
   config = lib.mkIf (cfg.enable && cfg.image.enable) {
+    # A headless KubeVirt guest must never sit at a boot menu, and it must say
+    # something while it boots: without console=ttyS0 nothing reaches the serial
+    # log, so "the VM is running and the desktop never answers" has no evidence
+    # attached to it (`virtctl console` shows a blank screen). Both are here
+    # because that diagnosis cost an afternoon.
+    boot.kernelParams = [
+      "console=tty0"
+      "console=ttyS0,115200"
+    ];
+
+    boot.loader.timeout = lib.mkDefault 1;
+
+    # The serial console is an operator's way in when the stream is the thing
+    # that is broken. Not autologin: whoever uses it authenticates.
+    systemd.services."serial-getty@ttyS0".enable = lib.mkDefault true;
+
     boot.loader.grub = {
       enable = true;
       # The VMI in api/server.mjs asks for machine type q35 with the default
@@ -53,6 +69,10 @@ in
       inherit config lib pkgs;
       format = "qcow2";
       partitionTableType = "legacy";
+      # Explicit, and the same value the root filesystem is mounted by: the
+      # builder's default happens to match, but a guest that cannot find its root
+      # has no console to complain on.
+      label = cfg.image.diskLabel;
       # "auto" sizes the filesystem from the closure instead of guessing, so a
       # bigger app set does not silently produce an image that no longer fits.
       diskSize = "auto";
