@@ -32,11 +32,32 @@
           exit 1
         fi
 
+        # Ask the session's own processes, not the process table. NixOS wraps
+        # XFCE's binaries, so the window manager's process is named `.xfwm4-wrapped`
+        # and `pgrep -x xfwm4` matches nothing however healthy the desktop is - which
+        # is how this rule came to report a working desktop as absent. `pgrep -f` is
+        # no better: verify.sh runs the check as `bash -c`, with the check text in its
+        # command line, so it would match itself.
+        cgroup=$(systemctl show -p ControlGroup --value mytops-desktop.service 2>/dev/null)
+        if [ -z "$cgroup" ]; then
+          cgroup=/system.slice/mytops-desktop.service
+        fi
+        pids=$(cat "/sys/fs/cgroup$cgroup/cgroup.procs" 2>/dev/null || true)
+
         for proc in xfwm4 xfce4-panel xfdesktop; do
-          pgrep -x "$proc" >/dev/null || {
+          running=0
+          while read -r pid; do
+            if [ -n "$pid" ] && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -- "$proc"; then
+              running=1
+              break
+            fi
+          done <<EOF
+$pids
+EOF
+          if [ "$running" != "1" ]; then
             echo "  $proc is not running: the session did not load"
             exit 1
-          }
+          fi
         done
       '';
     }
