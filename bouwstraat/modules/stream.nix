@@ -33,6 +33,31 @@ let
     dbus
   ];
 
+  # The variables a desktop session needs and a bare systemd unit does not have.
+  # `xfce4-session` finds its session and data files through XDG_DATA_DIRS and its
+  # helpers through PATH; with neither set it puts "Unable to load a failsafe
+  # session" on a black screen - and every health signal stayed green while it did,
+  # because the stream serves whatever the framebuffer happens to hold. A stream
+  # that answers 200 is not a desktop that works.
+  sessionEnv = [
+    "XDG_DATA_DIRS=/run/current-system/sw/share"
+    "XDG_CONFIG_DIRS=/run/current-system/sw/etc/xdg"
+  ];
+
+  sessionPath = with pkgs; [
+    coreutils
+    procps
+    dbus
+    xfce.xfce4-session
+    xfce.xfwm4
+    xfce.xfce4-panel
+    xfce.xfdesktop
+    xfce.xfconf
+    xfce.xfce4-settings
+    xfce.exo
+    xfce.tumbler
+  ];
+
   # noVNC's web root has vnc.html but no index.html, and the mytops API decides a
   # workspace is up by GET / answering 200 (guestStreamReady in api/server.mjs).
   # A directory listing would satisfy that check while telling the user nothing,
@@ -144,7 +169,7 @@ in
       ];
       # The wait loop is shell that calls seq and sleep; a systemd unit without
       # an explicit path gets /usr/bin:/bin, where neither exists.
-      path = unitPath;
+      path = sessionPath;
 
       serviceConfig = {
         Type = "simple";
@@ -161,7 +186,7 @@ in
           "HOME=/home/${cfg.user.name}"
           "XDG_RUNTIME_DIR=${xdgRuntimeDir}"
           "XDG_SESSION_TYPE=x11"
-        ];
+        ] ++ sessionEnv;
       };
     };
 
