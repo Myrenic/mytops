@@ -49,9 +49,12 @@ What to watch, in order, because each step fails differently:
    and `guestStreamReady` is an HTTP GET of `/`; both are separate from "the
    guest booted".
 6. **The workspace reports its own posture.**
-   `deploy@<namespace> exec ... mytops-verify` (as root for the full set). The
-   register report is also at `/etc/mytops/hardening.json`, and the result of a
-   root run at `/run/mytops/hardening-result.json`.
+   `mytops-verify` needs root for the full set, and the desktop user is
+   deliberately not in wheel - log in on the serial console
+   (`virtctl console -n kubevirt <name>`) as the break-glass admin from
+   `mytops.admin`, then run it. The register report is also at
+   `/etc/mytops/hardening.json`, and the result of a root run at
+   `/run/mytops/hardening-result.json`.
 7. **Suspend and resume.** Idle suspension halts the VM (`runStrategy: Halted`)
    and resume is a launch, not a rebuild — the home volume is not touched by
    either. A resume that loses files means the mount was not there to begin
@@ -75,6 +78,12 @@ kubectl -n services logs -f job/bouwstraat-build | tee /tmp/bouw.log
 #   GOLDEN-DISK-SHA256 <64 hex>
 #   GOLDEN-DISK-REV <the revision it checked out>
 ```
+
+The job asks for 8Gi on the workspace node and is pinned there, so it will sit
+`Pending` with `0/3 nodes are available: 1 Insufficient memory` while a workspace
+is running beside it - suspend or destroy one first (`kubectl -n kubevirt get vmi`,
+or stop it from the console) and it schedules. Nothing is lost: the build has not
+started, and the disk is still the previous one either way.
 
 Then pin it - with `REV`, because the revision an artifact was built from is not
 necessarily your HEAD:
