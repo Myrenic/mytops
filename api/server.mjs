@@ -270,10 +270,14 @@ function containerWorkspaceStatus(dep) {
   return "starting"
 }
 
-// `rootDisk` is the workspace's DataVolume phase, when the caller has it. A VM
-// whose referenced disk is being imported never gets a VMI, and a disk that
-// failed to import never will: without this the workspace would sit on
-// "starting" forever instead of offering Restart.
+// `rootDisk` is the workspace's DataVolume phase, when the caller has it. The
+// usual signal for a broken import is KubeVirt's own - the VM carries
+// `DataVolumeError` once the VMI reports it, which VM_FAILURE_STATES already
+// maps to offline (observed: the VM says DataVolumeError while CDI is still
+// retrying and the DataVolume phase is still ImportInProgress). This is the
+// direct signal for a disk that failed in a way KubeVirt has not attached to
+// the VM; a workspace that will never start must offer Restart rather than spin
+// "Starting" forever, and it must not depend on which of the two noticed first.
 function vmWorkspaceStatus(vm, streamReady, rootDisk) {
   if (vm?.spec?.runStrategy === "Halted") return "suspended"
   if (vm?.status?.ready && streamReady) return "running"
