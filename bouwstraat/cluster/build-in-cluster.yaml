@@ -1,35 +1,32 @@
-# Build the bouwstraat image inside the cluster.
+# Build the bouwstraat image inside the cluster, and install the result.
 #
-# Why this exists: nixpkgs' make-disk-image installs GRUB by booting a small VM
+# Why in-cluster: nixpkgs' make-disk-image installs GRUB by booting a small VM
 # (pkgs.vmTools.runInLinuxVM), so the derivation requires the `kvm` system
-# feature. A workstation without /dev/kvm therefore cannot build the qcow2 at
-# all - it fails with "Reason: missing system features / Required features:
-# {kvm}" only after the whole system closure has been built. The cluster nodes
-# run KubeVirt, so they do have /dev/kvm, and the registry the image is pushed to
-# is one hop away: build where both are true.
+# feature. A workstation without /dev/kvm cannot build the qcow2 at all - it
+# fails with "Reason: missing system features / Required features: {kvm}" only
+# after the whole system closure has been built. The cluster nodes run KubeVirt,
+# so they do have /dev/kvm.
 #
-# This is applied by hand, not by Flux: it is a one-shot build, not a desired
-# state. `scripts/bouwstraat.sh build` remains the path for anyone with a local
-# KVM host.
+# Why it also installs: the disk has to end up on the mytops-images volume either
+# way, and doing it here keeps the artifact inside the build that produced it -
+# no second job, no shared store, no window where "built" and "installed" are
+# different revisions.
+#
+# The store is the container's own writable layer, not a volume. That is not an
+# optimisation: a node hostPath produced a malformed db.sqlite, a Longhorn volume
+# produced a hash mismatch importing a substituted path and then an invalid store
+# path, and the ephemeral layer completed a full build on the first attempt. The
+# cost is a fresh download each time (~10 minutes); the alternative kept being a
+# store that lies. See docs/pitfalls.md.
+#
+# Before running: scale the image store down, because it mounts the same RWO
+# volume this copies into.
+#   kubectl -n services scale deploy/mytops-images --replicas=0
 #
 # Prerequisites (documented in docs/bouwstraat.md):
 #   kubectl -n services create secret docker-registry forgejo-registry \
 #     --docker-server=forge.tuntelder.com --docker-username=<user> \
-#     --docker-password=<token>
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: bouwstraat-nix
-  namespace: services
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: longhorn
-  resources:
-    requests:
-      # The built closure for one desktop image, with room for the next.
-      storage: 30Gi
----
+#     --docker-password=<token>      # only needed when PUSH_REGISTRY=1
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -37,8 +34,6 @@ metadata:
   namespace: services
 spec:
   backoffLimit: 0
-  # Keep the finished pod's logs around long enough to read the digest, then
-  # clean up after itself.
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
@@ -47,29 +42,10 @@ spec:
         app.kubernetes.io/component: build
     spec:
       restartPolicy: Never
-      # Any node has /dev/kvm; pinned so a rebuild lands where the last one did
-      # and the on-node store below is reused instead of re-fetched.
+      # Any node has /dev/kvm; pin the one that carries the workspace node pin in
+      # webui.yaml, so the image and the VMs that boot it live in one place.
       nodeSelector:
         kubernetes.io/hostname: talos-45w-c87
-      initContainers:
-        # A nix store cannot be mounted empty over /nix: the nix binary itself
-        # lives there, so an empty volume makes the image unusable. Seed the
-        # cache from the image once, then let it grow across builds.
-        - name: seed-store
-          image: docker.io/nixos/nix:latest
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -eu
-              if [ -x /cache/var/nix/profiles/default/bin/nix ]; then
-                echo "store cache already seeded"
-              else
-                echo "seeding store cache from the image"
-                cp -a /nix/. /cache/
-              fi
-          volumeMounts:
-            - name: cache
-              mountPath: /cache
       containers:
         - name: build
           image: docker.io/nixos/nix:latest
@@ -89,20 +65,11 @@ spec:
               # Only skopeo: the nixos/nix image already provides git and a CA
               # bundle in its profile, and `nix profile install git` fails with a
               # file conflict against that git-minimal before anything is built.
-              # A store on replicated storage does not verify itself, and this
-              # one has now produced both classic symptoms of trusting it: a
-              # malformed db.sqlite on a node hostPath, and a hash mismatch
-              # importing a substituted path from a Longhorn volume. Verify and
-              # repair first, so the cache is an optimisation rather than a
-              # hazard; anything corrupt is re-substituted from the binary cache.
-              nix-store --verify --check-contents --repair || true
-
               nix profile install nixpkgs#skopeo
 
               # skopeo refuses to run without a container signature policy, and
-              # an image build has nothing to verify against. This says so
-              # explicitly instead of failing with "no policy.json file found"
-              # after the disk has been built. Registry TLS is unaffected.
+              # an image build has nothing to verify against. Registry TLS is
+              # unaffected; this only says "do not check signatures".
               mkdir -p /etc/containers
               printf '%s\n' '{"default":[{"type":"insecureAcceptAnything"}]}' \
                 > /etc/containers/policy.json
@@ -115,17 +82,28 @@ spec:
               nix build --no-link --print-out-paths .#packages.x86_64-linux.qcow2 | tee /work/qcow2.path
               nix build --no-link --print-out-paths .#packages.x86_64-linux.ociImage | tee /work/oci.path
 
-              # The checksum of the disk as built. install-golden recomputes it
-              # from the copy it installs, and that is the one the catalog pins -
-              # this is here so a build log on its own says what it produced.
-              sha256sum "$(cat /work/qcow2.path)/nixos.qcow2" | tee /work/qcow2.sha256
-              echo "BOUWSTRAAT-DISK $(cat /work/qcow2.path)/nixos.qcow2"
-              echo "BOUWSTRAAT-DISK-SHA256 $(cut -d' ' -f1 /work/qcow2.sha256)"
+              # ---- install the disk into the image store -------------------
+              mkdir -p /images
+              cp "$(cat /work/qcow2.path)/nixos.qcow2" /images/disk.qcow2
+              # nginx runs as uid 101 and must be able to read it.
+              chmod 0644 /images/disk.qcow2
+              chmod 0755 /images
+              sync
 
-              # Registry push is off by default: the forge sits behind
-              # Cloudflare, which caps request bodies, so a multi-GB blob cannot
-              # be uploaded through it (413). Disk mode needs no registry - the
-              # disk is served from the cluster's own image store instead.
+              echo "installed-bytes: $(stat -c %s /images/disk.qcow2)"
+              # The checksum is taken from the copy on the volume, not from the
+              # build output: what the catalog pins has to be what the importer
+              # reads.
+              sha256sum /images/disk.qcow2 | tee /images/disk.qcow2.sha256
+              echo "GOLDEN-DISK-SHA256 $(cut -d' ' -f1 /images/disk.qcow2.sha256)"
+              echo "GOLDEN-DISK-REV $REV"
+              echo "BOUWSTRAAT-READY"
+
+              # ---- optional registry push ----------------------------------
+              # Off by default: the forge sits behind Cloudflare, which caps
+              # request bodies, so a multi-GB blob cannot be uploaded through it
+              # (413). Disk mode needs no registry - the disk is served from the
+              # cluster's own image store instead.
               if [ "$PUSH_REGISTRY" = "1" ]; then
                 skopeo copy --authfile /auth/.dockerconfigjson \
                   "docker-archive:$(cat /work/oci.path)" \
@@ -136,48 +114,40 @@ spec:
               fi
           env:
             - name: REV
-              value: "7b3e6ed6ceb673e148adbeda58adb9bbff885df3"
+              value: "3842bc0a3f6bd9cd0d0d8c9d3b0e7cb6f0a2baaa"
             - name: SHORT
-              value: "7b3e6ed6ceb6"
+              value: "3842bc0a3f6b"
             - name: REGISTRY
               value: "forge.tuntelder.com"
             - name: IMAGE
               value: "mtuntelder/mytops-desktop-nixos"
-            # Off: see the note at the push step. Set to 1 only from somewhere
-            # that can reach a registry without a body-size cap.
             - name: PUSH_REGISTRY
               value: "0"
           resources:
             requests:
               cpu: "4"
-              memory: 8Gi
+              memory: 12Gi
           securityContext:
             # The disk-image step boots a VM through /dev/kvm, which needs both.
             privileged: true
           volumeMounts:
-            - name: cache
-              mountPath: /nix
             - name: kvm
               mountPath: /dev/kvm
+            - name: images
+              mountPath: /images
             - name: registry-auth
               mountPath: /auth
               readOnly: true
             - name: work
               mountPath: /work
       volumes:
-        # A nix store on the node's ephemeral /var did not survive contact: the
-        # second build failed with "database disk image is malformed" in
-        # /nix/var/nix/db/db.sqlite, after the first one had paid the full
-        # download. A Longhorn volume is replicated, outlives the node's
-        # ephemeral storage, and still keeps ~20 GiB of closure out of the way of
-        # everything else.
-        - name: cache
-          persistentVolumeClaim:
-            claimName: bouwstraat-nix
         - name: kvm
           hostPath:
             path: /dev/kvm
             type: CharDevice
+        - name: images
+          persistentVolumeClaim:
+            claimName: mytops-images
         - name: registry-auth
           secret:
             secretName: forgejo-registry
