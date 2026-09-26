@@ -6,6 +6,23 @@
 }:
 let
   cfg = config.mytops;
+
+  # The session as a program: the unit's ExecStart stays a path, and the order the
+  # components start in is reviewable shell in this repository rather than a
+  # session manager's saved state.
+  sessionScript = pkgs.writeShellApplication {
+    name = "mytops-desktop-session";
+    runtimeInputs = with pkgs; [
+      coreutils
+      procps
+      xfce.xfwm4
+      xfce.xfce4-panel
+      xfce.xfdesktop
+      xfce.xfce4-settings
+      xfce.xfconf
+    ];
+    text = builtins.readFile ./desktop-session.sh;
+  };
 in
 {
   options.mytops.desktop = {
@@ -42,10 +59,15 @@ in
       readOnly = true;
       default =
         if cfg.desktop.environment == "xfce" then
-          "${pkgs.xfce.xfce4-session}/bin/xfce4-session"
+          "${sessionScript}/bin/mytops-desktop-session"
         else
           "true";
-      description = "The session binary the streamed display runs.";
+      description = ''
+        The session the streamed display runs. For xfce this is a script that
+        starts the components in order (see modules/desktop-session.sh), not
+        xfce4-session: its session save/restore started nothing at all on a fresh
+        workspace while reporting success.
+      '';
     };
   };
 

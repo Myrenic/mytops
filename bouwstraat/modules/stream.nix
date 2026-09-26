@@ -15,7 +15,6 @@ let
   display = cfg.stream.display;
   displayNumber = lib.removePrefix ":" display;
 
-  xdgRuntimeDir = "/run/mytops/xdg";
 
   # Every unit in this block gets this PATH. A systemd unit on NixOS starts with
   # /usr/bin:/bin, which is empty, so a script that calls `seq`, `ps`, `kill` or
@@ -32,6 +31,7 @@ let
     procps
     dbus
   ];
+
 
   # The variables a desktop session needs and a bare systemd unit does not have.
   # `xfce4-session` finds its session and data files through XDG_DATA_DIRS and its
@@ -133,10 +133,6 @@ in
   };
 
   config = lib.mkIf (cfg.enable && cfg.stream.enable) {
-    systemd.tmpfiles.rules = [
-      "d ${xdgRuntimeDir} 0700 ${cfg.user.name} ${cfg.user.name} -"
-    ];
-
     systemd.services.mytops-xvfb = {
       description = "mytops virtual X display";
       wantedBy = [ "multi-user.target" ];
@@ -177,6 +173,11 @@ in
         Restart = "always";
         RestartSec = 5;
         WorkingDirectory = "/home/" + cfg.user.name;
+        # systemd creates this before ExecStart and owns its lifetime, which a
+        # tmpfiles rule did not reliably do: dbus refused to start the session bus
+        # ("XDG_RUNTIME_DIR /run/mytops/xdg not available") and every XFCE client
+        # that needs the bus then failed to start.
+        RuntimeDirectory = "mytops-xdg";
         ExecStartPre = waitForDisplay;
         # A session bus per session, not the system one: dbus-run-session gives
         # the desktop its own bus and tears it down with the session.
@@ -184,7 +185,7 @@ in
         Environment = [
           "DISPLAY=${display}"
           "HOME=/home/${cfg.user.name}"
-          "XDG_RUNTIME_DIR=${xdgRuntimeDir}"
+          "XDG_RUNTIME_DIR=/run/mytops-xdg"
           "XDG_SESSION_TYPE=x11"
         ] ++ sessionEnv;
       };
