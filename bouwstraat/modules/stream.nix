@@ -17,6 +17,30 @@ let
 
   xdgRuntimeDir = "/run/mytops/xdg";
 
+  # noVNC's web root has vnc.html but no index.html, and the mytops API decides a
+  # workspace is up by GET / answering 200 (guestStreamReady in api/server.mjs).
+  # A directory listing would satisfy that check while telling the user nothing,
+  # and --file-only turns the listing off anyway - so the image serves an index
+  # that goes straight to a connected session. Removing this would leave a
+  # workspace that works and reports "starting" forever.
+  webRoot = pkgs.runCommand "mytops-novnc-web" { } (
+    builtins.concatStringsSep "\n" [
+      "mkdir -p $out"
+      "cp -r ${pkgs.novnc}/share/webapps/novnc/. $out/"
+      "cat > $out/index.html <<'HTMLEOF'"
+      "<!doctype html>"
+      "<html lang=en><head><meta charset=utf-8>"
+      "<title>mytops workspace</title>"
+      # A meta refresh, not a script: it works with scripts disabled and in
+      # every browser this is opened in.
+      "<meta http-equiv=refresh content=\"0;url=vnc.html?autoconnect=1&resize=scale&reconnect=1\">"
+      "</head><body>"
+      "<a href=\"vnc.html?autoconnect=1&resize=scale&reconnect=1\">open the desktop</a>"
+      "</body></html>"
+      "HTMLEOF"
+    ]
+  );
+
   # Wait for the X socket instead of racing it. A session that starts before its
   # display exists dies with "cannot open display", and systemd would then show
   # a failed unit that is really a timing fact.
@@ -179,6 +203,7 @@ in
           "${pkgs.novnc}/bin/novnc"
           "--listen 0.0.0.0:${toString cfg.stream.port}"
           "--vnc 127.0.0.1:${toString cfg.stream.vncPort}"
+          "--web ${webRoot}"
           "--file-only"
         ];
       };
