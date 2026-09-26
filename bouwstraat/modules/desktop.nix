@@ -66,8 +66,17 @@ in
     environment.systemPackages =
       cfg.desktop.apps
       ++ lib.optionals (cfg.desktop.environment == "xfce") (with pkgs; [
-        xfce.exo
+        # The whole session, not the parts that happen to be dependencies of
+        # something else. xfce4-session with no window manager is the "Unable to
+        # load a failsafe session" failure: the session starts, finds no client to
+        # launch, and leaves a black screen. xfwm4 and xfdesktop were missing from
+        # the first two images for exactly that reason - nothing referenced them.
+        xfce.xfwm4
+        xfce.xfce4-panel
+        xfce.xfdesktop
+        xfce.xfconf
         xfce.xfce4-settings
+        xfce.exo
         xfce.tumbler
         shared-mime-info
         desktop-file-utils
