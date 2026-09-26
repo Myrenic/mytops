@@ -32,12 +32,18 @@ spec:
       containers:
         - name: coturn
           image: docker.io/coturn/coturn:4.18.0
+          # Flags are checked against the image, not against coturn's docs: this
+          # turnserver rejects `--no-dtls` outright ("unrecognized option"),
+          # prints its usage and exits 1 - which is why every coturn pod in this
+          # deployment was in CrashLoopBackOff and VM desktops had no relay.
+          # DTLS listeners are off unless `--dtls` is passed, and the CLI is off
+          # unless `--cli` is passed, so neither negation is spelled any more
+          # (`--no-cli` is deprecated and logged as an error in this version).
           command:
             - /bin/sh
             - -c
             - >-
               exec turnserver
-              --no-cli
               --listening-port="$TURN_PORT"
               --listening-ip=0.0.0.0
               --fingerprint
@@ -45,7 +51,6 @@ spec:
               --use-auth-secret
               --static-auth-secret="$TURN_SHARED_SECRET"
               --no-tls
-              --no-dtls
               --min-port=61000
               --max-port=65535
           env:
