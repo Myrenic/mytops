@@ -16,6 +16,20 @@
 #   kubectl -n services create secret docker-registry forgejo-registry \
 #     --docker-server=forge.tuntelder.com --docker-username=<user> \
 #     --docker-password=<token>
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bouwstraat-nix
+  namespace: services
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      # The built closure for one desktop image, with room for the next.
+      storage: 30Gi
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -93,17 +107,25 @@ spec:
               nix build --no-link --print-out-paths .#packages.x86_64-linux.qcow2 | tee /work/qcow2.path
               nix build --no-link --print-out-paths .#packages.x86_64-linux.ociImage | tee /work/oci.path
 
-              # The tag is for humans; the digest printed below is what the
-              # catalog pins, and it is read back from the registry rather than
-              # assumed.
-              skopeo copy --authfile /auth/.dockerconfigjson \
-                "docker-archive:$(cat /work/oci.path)" \
-                "docker://$REGISTRY/$IMAGE:rev-$SHORT"
+              # The checksum of the disk as built. install-golden recomputes it
+              # from the copy it installs, and that is the one the catalog pins -
+              # this is here so a build log on its own says what it produced.
+              sha256sum "$(cat /work/qcow2.path)/nixos.qcow2" | tee /work/qcow2.sha256
+              echo "BOUWSTRAAT-DISK $(cat /work/qcow2.path)/nixos.qcow2"
+              echo "BOUWSTRAAT-DISK-SHA256 $(cut -d' ' -f1 /work/qcow2.sha256)"
 
-              skopeo inspect --authfile /auth/.dockerconfigjson --format '{{.Digest}}' \
-                "docker://$REGISTRY/$IMAGE:rev-$SHORT" | tee /work/digest
-
-              echo "BOUWSTRAAT-IMAGE $REGISTRY/$IMAGE@$(cat /work/digest)"
+              # Registry push is off by default: the forge sits behind
+              # Cloudflare, which caps request bodies, so a multi-GB blob cannot
+              # be uploaded through it (413). Disk mode needs no registry - the
+              # disk is served from the cluster's own image store instead.
+              if [ "$PUSH_REGISTRY" = "1" ]; then
+                skopeo copy --authfile /auth/.dockerconfigjson \
+                  "docker-archive:$(cat /work/oci.path)" \
+                  "docker://$REGISTRY/$IMAGE:rev-$SHORT"
+                skopeo inspect --authfile /auth/.dockerconfigjson --format '{{.Digest}}' \
+                  "docker://$REGISTRY/$IMAGE:rev-$SHORT" | tee /work/digest
+                echo "BOUWSTRAAT-IMAGE $REGISTRY/$IMAGE@$(cat /work/digest)"
+              fi
           env:
             - name: REV
               value: "7b3e6ed6ceb673e148adbeda58adb9bbff885df3"
@@ -113,6 +135,10 @@ spec:
               value: "forge.tuntelder.com"
             - name: IMAGE
               value: "mtuntelder/mytops-desktop-nixos"
+            # Off: see the note at the push step. Set to 1 only from somewhere
+            # that can reach a registry without a body-size cap.
+            - name: PUSH_REGISTRY
+              value: "0"
           resources:
             requests:
               cpu: "4"
@@ -131,13 +157,15 @@ spec:
             - name: work
               mountPath: /work
       volumes:
-        # Disposable build cache, not data: a hostPath keeps ~20 GiB of closure
-        # out of Longhorn and makes a retry (or the next revision) a no-op
-        # instead of another full download from cache.nixos.org.
+        # A nix store on the node's ephemeral /var did not survive contact: the
+        # second build failed with "database disk image is malformed" in
+        # /nix/var/nix/db/db.sqlite, after the first one had paid the full
+        # download. A Longhorn volume is replicated, outlives the node's
+        # ephemeral storage, and still keeps ~20 GiB of closure out of the way of
+        # everything else.
         - name: cache
-          hostPath:
-            path: /var/mytops-bouwstraat-nix
-            type: DirectoryOrCreate
+          persistentVolumeClaim:
+            claimName: bouwstraat-nix
         - name: kvm
           hostPath:
             path: /dev/kvm

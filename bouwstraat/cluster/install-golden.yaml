@@ -24,9 +24,6 @@ spec:
         app.kubernetes.io/component: install-golden
     spec:
       restartPolicy: Never
-      # The cache is node-local and only exists where the build ran.
-      nodeSelector:
-        kubernetes.io/hostname: talos-45w-c87
       containers:
         - name: install
           image: docker.io/library/alpine:3.21
@@ -71,9 +68,8 @@ spec:
               mountPath: /images
       volumes:
         - name: cache
-          hostPath:
-            path: /var/mytops-bouwstraat-nix
-            type: Directory
+          persistentVolumeClaim:
+            claimName: bouwstraat-nix
         - name: images
           persistentVolumeClaim:
             claimName: mytops-images
