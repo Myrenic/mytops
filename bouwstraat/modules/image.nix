@@ -31,6 +31,26 @@ in
       "console=ttyS0,115200"
     ];
 
+    # KubeVirt attaches every disk as virtio, so stage 1 has to be able to load
+    # virtio_blk from the initrd. Without these the guest boots, prints
+    # "waiting for device /dev/disk/by-label/nixos to appear......" on the serial
+    # console, and finally panics in switch_root - a disk that is attached, a
+    # kernel that is running, and no block device in between.
+    boot.initrd.availableKernelModules = [
+      "virtio_pci"
+      "virtio_blk"
+      "virtio_scsi"
+      "virtio_net"
+      "sd_mod"
+      "sr_mod"
+      "ext4"
+      "ahci"
+      "usb_storage"
+    ];
+    # The NoCloud seed is a virtio disk too, and cloud-init looks for it by its
+    # cidata filesystem label once stage 2 is up.
+    boot.initrd.kernelModules = [ "virtio_blk" ];
+
     boot.loader.timeout = lib.mkDefault 1;
 
     # The serial console is an operator's way in when the stream is the thing
