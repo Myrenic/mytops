@@ -18,16 +18,19 @@ let
   xdgRuntimeDir = "/run/mytops/xdg";
 
   # Every unit in this block gets this PATH. A systemd unit on NixOS starts with
-  # /usr/bin:/bin, which is empty, so a script that calls `seq`, `ps` or `kill`
-  # fails with command-not-found - and the failure surfaces as something else
-  # entirely. `novnc`'s wrapper checks whether websockify came up with `ps` and
-  # reports "Failed to start WebSockets proxy" without it, which put this unit in
-  # a two-second restart loop: the port was bound only in the gaps, one probe in
-  # six answered, and the workspace reported "starting" forever. coreutils for
-  # seq/sleep/kill, procps for ps.
+  # /usr/bin:/bin, which is empty, so a script that calls `seq`, `ps`, `kill` or
+  # `dbus-daemon` fails with command-not-found - and the failure surfaces as
+  # something else entirely. `novnc`'s wrapper checks whether websockify came up
+  # with `ps` and reports "Failed to start WebSockets proxy" without it, which put
+  # this unit in a two-second restart loop: the port was bound only in the gaps,
+  # one probe in six answered, and the workspace reported "starting" forever.
+  # `dbus-run-session` spawns `dbus-daemon` by name, so the session unit needs dbus
+  # here too - without it the session exits 127 and restarts (19 times) while the
+  # stream happily serves the last frame it saw.
   unitPath = with pkgs; [
     coreutils
     procps
+    dbus
   ];
 
   # noVNC's web root has vnc.html but no index.html, and the mytops API decides a

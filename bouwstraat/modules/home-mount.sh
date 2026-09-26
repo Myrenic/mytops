@@ -39,9 +39,24 @@ mkdir -p "$MOUNT_POINT"
 # hard, not soft: soft turns a storage blip into silent data loss for anything
 # that does not check its writes, and a workspace profile is exactly that.
 # _netdev so the mount machinery knows it needs the network up first.
-if ! mount -t nfs -o nfsvers=4.1,hard,noatime,_netdev "$source" "$MOUNT_POINT"; then
-  echo "mytops-home: could not mount $source at $MOUNT_POINT - continuing with a local home" >&2
-  exit 0
+#
+# MOUNT_NFS names the helper outright: `mount -t nfs` did not find it (util-linux
+# looks in /sbin, which is empty on NixOS) and fell back to a raw mount(2) that the
+# kernel rejected with "NFS: mount program didn't pass remote address" - while this
+# unit reported success and the user got an empty home.
+if [ -n "${MOUNT_NFS:-}" ] && [ -x "$MOUNT_NFS" ]; then
+  mount_cmd="$MOUNT_NFS"
+else
+  mount_cmd="mount -t nfs"
+fi
+
+if ! $mount_cmd -o nfsvers=4.1,hard,noatime,_netdev "$source" "$MOUNT_POINT"; then
+  # Fail the unit rather than continue: a workspace that reports "up" with a
+  # throwaway home is indistinguishable, to the person using it, from losing their
+  # files. The desktop still starts (it only orders after this), and both
+  # `systemctl --failed` and the register's home-mounted rule say so.
+  echo "mytops-home: could not mount $source at $MOUNT_POINT" >&2
+  exit 1
 fi
 
 # A brand-new Longhorn volume is handed over owned by root, and the desktop runs

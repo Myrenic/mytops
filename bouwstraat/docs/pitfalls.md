@@ -273,12 +273,28 @@ the same node answered 12/12, which is what pointed at the guest rather than the
 network.
 
 **What to do.** One shared `path` for every unit in a block (`unitPath` in
-`modules/stream.nix`): `coreutils` for `seq`/`sleep`/`kill` and `procps` for
-`ps`, plus whatever a wrapper may reach for (`util-linux` for `mountpoint`,
-`nfs-utils` for `mount`). `mytops-verify` has the matching hazard in the other
-direction: a missing binary is command-not-found, which a naive verifier reports
-as a *violated rule* - the opposite of the truth. Every binary a rule's check
-may call is listed in `runtimeInputs`.
+`modules/stream.nix`): `coreutils` for `seq`/`sleep`/`kill`, `procps` for `ps`,
+`dbus` because `dbus-run-session` spawns `dbus-daemon` by name, plus whatever a
+wrapper may reach for (`util-linux` for `mountpoint`, `nfs-utils` for `mount`).
+`mytops-verify` has the matching hazard in the other direction: a missing binary
+is command-not-found, which a naive verifier reports as a *violated rule* - the
+opposite of the truth. Every binary a rule's check may call is listed in
+`runtimeInputs`.
+
+The same class bit twice more in one deploy, both with a *silent* symptom:
+
+- `dbus-run-session: failed to execute message bus daemon 'dbus-daemon': No such
+  file or directory` - the session exited 127 and restarted 19 times, while the
+  stream served the last frame it had and the workspace reported `running`. A
+  restarted XFCE session looks, on a screenshot, exactly like an idle one.
+- `mount: /home/user: fsconfig() failed: NFS: mount program didn't pass remote
+  address`. Here PATH was not enough: `util-linux`'s mount looks for
+  `/sbin/mount.nfs`, a compiled-in path that does not exist on NixOS, and does not
+  consult PATH for the helper - so it fell back to a raw `mount(2)` with the
+  `host:/path` string as the device. The unit *reported success* and the user got
+  an empty home. Name the helper outright (`MOUNT_NFS` in `modules/home.nix`), fail
+  the unit when the mount fails, and let the register's `home-mounted` rule say so
+  on the device - every other signal was green.
 
 ## `/run/mytops` is a hand-off, and hand-offs have ordering
 

@@ -74,6 +74,13 @@ in
           "SOURCE_FILE=${cfg.home.sourceFile}"
           "OWNER_UID=${toString cfg.user.uid}"
           "OWNER_NAME=${cfg.user.name}"
+          # By absolute path, because `mount -t nfs` never found the helper:
+          # util-linux's mount looks for /sbin/mount.nfs (a compiled-in path that
+          # does not exist here) and falls back to a bare mount(2) with the string
+          # as the device, which the kernel rejects with "NFS: mount program
+          # didn't pass remote address". The unit has nfs-utils on its PATH and
+          # still lost that lookup, so the helper is named outright.
+          "MOUNT_NFS=${pkgs.nfs-utils}/bin/mount.nfs"
         ];
       };
       # Kept in the repository as a shell script so it can be read, grepped and

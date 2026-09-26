@@ -99,10 +99,11 @@ let
       jq
       coreutils
       gnugrep
-      procps # sysctl
+      procps # sysctl, ps
       nftables # nft
       systemd # systemctl, timedatectl
       openssh # sshd -T
+      util-linux # mountpoint - the home-mounted rule
     ];
     text = builtins.readFile ./hardening-verify.sh;
   };
