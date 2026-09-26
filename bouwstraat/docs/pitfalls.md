@@ -86,6 +86,31 @@ mid-rewrite. Nothing was wrong with the file.
 **What to do.** Do not rewrite the tree (rebase, checkout, stash) while a build
 is running. Nothing about the error will tell you that is what happened.
 
+## A cloud-init runcmd that restarts a unit ordered after cloud-final deadlocks
+
+The user-data ends with `systemctl restart mytops-home.service`, and
+`mytops-home.service` was ordered `After=cloud-final.service`. cloud-final runs
+the `runcmd` stage, so it waited for the restart; the restart waited for
+cloud-final to finish; and because cloud-final was already running, systemd did
+not see an ordering *cycle* to break. The boot simply sat there:
+
+```
+JOB UNIT                   TYPE  STATE
+94  cloud-final.service    start running     ← 8 minutes, and counting
+101 mytops-home.service    start waiting
+76  mytops-xvfb.service    start waiting
+1   multi-user.target      start waiting
+```
+
+Outside, everything looked healthy: the VMI was Running, cloud-init had written
+`/run/mytops/home-source`, the login prompt worked, and every `mytops-*` unit was
+enabled with its symlink in place.
+
+**What to do.** Order the unit after the stage that *writes* what it needs
+(`cloud-config.service`, where `write_files` runs), not after the stage that
+*calls* it. If a runcmd has to poke a unit, that unit must not be waiting for the
+runcmd's own stage - systemd will not save you from that one.
+
 ## An initrd without virtio_blk makes a running VM with no disk
 
 The first boot of the first built disk reached stage 1 and stopped:

@@ -38,10 +38,20 @@ in
       description = "Mount the mytops home volume";
       wantedBy = [ "multi-user.target" ];
       wants = [ "network-online.target" ];
+      # cloud-config.service, NOT cloud-final.service. The API's user-data ends
+      # with `systemctl restart mytops-home.service`, which runs in cloud-final -
+      # so ordering this unit after cloud-final deadlocks the boot: cloud-final
+      # waits for the restart, the restart waits for cloud-final (which is
+      # already running, so systemd does not treat it as an ordering cycle), and
+      # the entire desktop chain sits "waiting" behind a cloud-init that never
+      # finishes. It hung for eight minutes on the first boot of this image.
+      #
+      # The file this unit needs is written by the config stage, so waiting for
+      # cloud-config is both sufficient and safe; the runcmd restart stays as a
+      # second attempt for a launch whose seed arrives late.
       after = [
         "network-online.target"
         "cloud-config.service"
-        "cloud-final.service"
       ];
       # Everything that shows the user a screen waits for this: a desktop that
       # starts before the home is mounted has its session written to the root
