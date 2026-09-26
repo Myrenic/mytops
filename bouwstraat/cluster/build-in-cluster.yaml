@@ -89,6 +89,14 @@ spec:
               # Only skopeo: the nixos/nix image already provides git and a CA
               # bundle in its profile, and `nix profile install git` fails with a
               # file conflict against that git-minimal before anything is built.
+              # A store on replicated storage does not verify itself, and this
+              # one has now produced both classic symptoms of trusting it: a
+              # malformed db.sqlite on a node hostPath, and a hash mismatch
+              # importing a substituted path from a Longhorn volume. Verify and
+              # repair first, so the cache is an optimisation rather than a
+              # hazard; anything corrupt is re-substituted from the binary cache.
+              nix-store --verify --check-contents --repair || true
+
               nix profile install nixpkgs#skopeo
 
               # skopeo refuses to run without a container signature policy, and
