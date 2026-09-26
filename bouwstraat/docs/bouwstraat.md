@@ -45,17 +45,24 @@ What to watch, in order, because each step fails differently:
    `findmnt /home/user` should name the Longhorn share. This is the step whose
    failure mode is *silent*: a desktop that started before the mount writes its
    profile into the root disk and the user sees an empty desktop, not an error.
-5. **The stream answers.** The API's readiness probe is a TCP connect to 8080
+   `mytops-verify`'s `home-mounted` rule reports exactly this, and the unit now
+   fails instead of logging "continuing with a local home" — both because that
+   sentence was true, and because nothing else noticed it.
+5. **The session is not restarting.** `systemctl show mytops-desktop -p NRestarts`
+   should be 0. A session that exits and comes back looks identical from the
+   outside - the stream keeps serving the last frame it saw - so the counter is
+   the only cheap signal that the desktop is actually alive.
+6. **The stream answers.** The API's readiness probe is a TCP connect to 8080
    and `guestStreamReady` is an HTTP GET of `/`; both are separate from "the
    guest booted".
-6. **The workspace reports its own posture.**
+7. **The workspace reports its own posture.**
    `mytops-verify` needs root for the full set, and the desktop user is
    deliberately not in wheel - log in on the serial console
    (`virtctl console -n kubevirt <name>`) as the break-glass admin from
    `mytops.admin`, then run it. The register report is also at
    `/etc/mytops/hardening.json`, and the result of a root run at
    `/run/mytops/hardening-result.json`.
-7. **Suspend and resume.** Idle suspension halts the VM (`runStrategy: Halted`)
+8. **Suspend and resume.** Idle suspension halts the VM (`runStrategy: Halted`)
    and resume is a launch, not a rebuild — the home volume is not touched by
    either. A resume that loses files means the mount was not there to begin
    with, so look at step 4 rather than at suspension.
