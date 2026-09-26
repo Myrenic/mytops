@@ -114,9 +114,9 @@ spec:
               fi
           env:
             - name: REV
-              value: "26f5fac95b13db3f6d831ea164c5532bac61b4a5"
+              value: "de37d35b8b4db951d896820f272683341acd37d4"
             - name: SHORT
-              value: "26f5fac95b13"
+              value: "de37d35b8b4d"
             - name: REGISTRY
               value: "forge.tuntelder.com"
             - name: IMAGE
