@@ -65,7 +65,18 @@ let
       compliance = rule.compliance or [ ];
       tags = rule.tags or [ ];
       summary = rule.summary;
-      check = rule.check;
+      # A check is a string, or a function of the mytops options for the rules
+      # that need a value from the configuration (the stream port a firewall must
+      # allow). Rendering it here keeps the report the single thing the device
+      # executes, and keeps one source of truth for that value.
+      check =
+        if builtins.isFunction rule.check then
+          rule.check {
+            inherit lib;
+            cfg = config.mytops;
+          }
+        else
+          rule.check;
       enabled = enabled;
     };
 

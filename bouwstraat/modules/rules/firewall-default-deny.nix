@@ -19,16 +19,31 @@
             allowedUDPPorts = lib.mkForce [ ];
           };
         };
-      check = ''
-        systemctl is-active --quiet nftables || { echo "  nftables is not running"; exit 1; }
-        # The NixOS firewall accepts by policy and rejects explicitly, so a
-        # missing reject rule is the failure this looks for - a box that
-        # "has a firewall" and lets everything in.
-        nft list ruleset 2>/dev/null | grep -qE 'reject|drop' || {
-          echo "  no reject/drop rule in the ruleset"
-          exit 1
-        }
-      '';
+      check =
+        { cfg, ... }:
+        ''
+          # `firewall.service`, not `nftables.service`: NixOS's firewall is its own
+          # unit (nftables backend, iptables-compatible interface), while
+          # nftables.service is a separate optional unit for hand-written rules and
+          # is normally inactive. Testing for the latter reported a control that was
+          # in place as missing - and the device said so on the console:
+          #   PASS apparmor / == firewall-default-deny rc=1 "nftables is not running"
+          if ! systemctl is-active --quiet firewall.service; then
+            echo "  firewall.service is not running"
+            exit 1
+          fi
+          ruleset=$(nft list ruleset 2>/dev/null || true)
+          if ! printf '%s' "$ruleset" | grep -qE 'reject|drop'; then
+            echo "  no reject/drop rule in the ruleset"
+            exit 1
+          fi
+          # The control is only in place if the one port a workspace needs is the
+          # one it allows: a firewall that rejects everything is not this rule.
+          if ! printf '%s' "$ruleset" | grep -q "dport ${toString cfg.stream.port}"; then
+            echo "  the stream port ${toString cfg.stream.port} is not explicitly allowed"
+            exit 1
+          fi
+        '';
     }
   ];
 }

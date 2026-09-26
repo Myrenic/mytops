@@ -36,8 +36,16 @@ results="[]"
 
 while IFS=$'\t' read -r id severity summary b64; do
   script=$(printf '%s' "$b64" | base64 -d)
-  out=$(bash -c "$script" 2>&1)
-  rc=$?
+  # `|| rc=$?` and `</dev/null` are both load-bearing:
+  #
+  #   - writeShellApplication runs this with `set -e`, so a bare
+  #     `out=$(bash -c ...)` aborts the whole report the moment a check fails.
+  #     The first violation hid the four rules behind it, which is the worst
+  #     possible behaviour for the one tool that is supposed to tell the truth
+  #     about a device.
+  #   - a check that reads stdin would otherwise eat the loop's remaining rules.
+  rc=0
+  out=$(bash -c "$script" </dev/null 2>&1) || rc=$?
   case "$rc" in
     0)
       printf 'PASS  %-24s (%s)\n' "$id" "$severity"

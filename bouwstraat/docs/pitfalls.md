@@ -172,6 +172,55 @@ neither be released nor replaced.
 **What to do.** RWX (what the user home volumes already use). A build installs a
 new disk while the store keeps serving, and none of the above is reachable.
 
+## `writeShellApplication` adds `set -e`, and a verifier must not have it
+
+The register's report stopped after its first rule:
+
+```
+mytops hardening: level=hardened compliance=[bio] excludeTags=[breaks-usb]
+
+PASS  apparmor                 (hardened)
+```
+
+rc=1, no summary, four rules silently unreported. The checks themselves were
+fine - run one at a time from the report they all answered - because the fault was
+in the harness: `writeShellApplication` prepends `set -euo pipefail` to the script,
+and
+
+```bash
+out=$(bash -c "$script" 2>&1)   # a failing check aborts the whole loop
+rc=$?
+```
+
+never reaches `rc=$?`. The second rule failed, so the report ended there. For the
+one tool whose job is to describe a device honestly, "the first violation hides
+every other rule" is the worst possible failure mode.
+
+**What to do.** `rc=0; out=$(bash -c "$script" </dev/null 2>&1) || rc=$?` - the
+`|| rc=$?` keeps `set -e` out of it, and `</dev/null` stops a check from eating the
+loop's remaining rules. Be suspicious of `$(...)` in any script you did not write
+the `set` flags for.
+
+## A check that looks at the wrong unit is worse than no check
+
+`firewall-default-deny` reported `nftables is not running` on a device whose
+firewall was up and rejecting:
+
+```
+systemctl is-active firewall.service   -> active
+systemctl is-active nftables.service   -> inactive
+```
+
+NixOS's firewall is `firewall.service` (nftables backend behind an
+iptables-compatible interface); `nftables.service` is a *different*, optional unit
+for hand-written rules. The control was in place and the check said it was missing,
+which is the failure direction that erodes trust in the whole register.
+
+**What to do.** Assert on the thing the control actually is: the unit that owns it,
+plus the property you care about (`nft list ruleset` has a reject/drop *and* the
+one port the workspace needs). A check that only asks "is a firewall-ish unit
+running" would have gone green on the wrong unit too.
+
 ## `+` on a path eats the slash
 
 ```nix
