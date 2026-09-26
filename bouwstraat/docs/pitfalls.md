@@ -206,8 +206,26 @@ A `ExecStartPre` wait loop that calls `seq` and `sleep` works in a shell and
 fails in a unit: systemd gives a service `/usr/bin:/bin`, and on NixOS nothing
 lives there. The unit restarts forever with `command not found` in the journal.
 
-**What to do.** `path = [ pkgs.coreutils ];` on the units that run shell, and
-the same for anything the script may call (`util-linux` for `mountpoint`,
+The sharper version of this is a *wrapper script you did not write*. `novnc` is
+bash that starts websockify and then asks `ps` whether it came up:
+
+```
+novnc[2054]: /nix/store/…-novnc-1.6.0/bin/novnc: line 215: ps: command not found
+novnc[2045]: Failed to start WebSockets proxy
+systemd[1]: mytops-web.service: Main process exited, code=exited, status=1/FAILURE
+```
+
+Without `procps` the wrapper reports a start failure, exits 1, and systemd
+restarts it every two seconds - so the port is bound only in the gaps. The
+workspace looked like this from outside: `restart counter is at 58`, one probe in
+six answering 200, and a status that never left "starting" while every unit
+reported `active (running)` in the same breath. A reliable `ubuntu-vm` guest on
+the same node answered 12/12, which is what pointed at the guest rather than the
+network.
+
+**What to do.** One shared `path` for every unit in a block (`unitPath` in
+`modules/stream.nix`): `coreutils` for `seq`/`sleep`/`kill` and `procps` for
+`ps`, plus whatever a wrapper may reach for (`util-linux` for `mountpoint`,
 `nfs-utils` for `mount`). `mytops-verify` has the matching hazard in the other
 direction: a missing binary is command-not-found, which a naive verifier reports
 as a *violated rule* - the opposite of the truth. Every binary a rule's check

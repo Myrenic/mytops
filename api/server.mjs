@@ -768,10 +768,10 @@ function nixosCloudInitUserData(homeSource) {
     "    permissions: '0644'",
     "    content: |",
     "      " + (homeSource ?? ""),
-    "runcmd:",
-    // The unit is ordered after cloud-final anyway; restarting it makes the
-    // mount happen in this boot even when the seed arrives late.
-    "  - systemctl restart mytops-home.service || true",
+    // No runcmd: the image's mytops-home.service waits for cloud-config.service
+    // (this stage), so the mount happens on its own once this file exists. An
+    // earlier version also restarted the unit here, which re-mounted the home
+    // out from under a desktop that had already started.
   ].join("\n")
 }
 

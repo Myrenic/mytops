@@ -17,6 +17,19 @@ let
 
   xdgRuntimeDir = "/run/mytops/xdg";
 
+  # Every unit in this block gets this PATH. A systemd unit on NixOS starts with
+  # /usr/bin:/bin, which is empty, so a script that calls `seq`, `ps` or `kill`
+  # fails with command-not-found - and the failure surfaces as something else
+  # entirely. `novnc`'s wrapper checks whether websockify came up with `ps` and
+  # reports "Failed to start WebSockets proxy" without it, which put this unit in
+  # a two-second restart loop: the port was bound only in the gaps, one probe in
+  # six answered, and the workspace reported "starting" forever. coreutils for
+  # seq/sleep/kill, procps for ps.
+  unitPath = with pkgs; [
+    coreutils
+    procps
+  ];
+
   # noVNC's web root has vnc.html but no index.html, and the mytops API decides a
   # workspace is up by GET / answering 200 (guestStreamReady in api/server.mjs).
   # A directory listing would satisfy that check while telling the user nothing,
@@ -100,6 +113,7 @@ in
       description = "mytops virtual X display";
       wantedBy = [ "multi-user.target" ];
       after = [ "mytops-home.service" ];
+      path = unitPath;
       serviceConfig = {
         Type = "simple";
         User = cfg.user.name;
@@ -127,7 +141,7 @@ in
       ];
       # The wait loop is shell that calls seq and sleep; a systemd unit without
       # an explicit path gets /usr/bin:/bin, where neither exists.
-      path = [ pkgs.coreutils ];
+      path = unitPath;
 
       serviceConfig = {
         Type = "simple";
@@ -156,7 +170,7 @@ in
         "mytops-xvfb.service"
         "mytops-desktop.service"
       ];
-      path = [ pkgs.coreutils ];
+      path = unitPath;
 
       serviceConfig = {
         Type = "simple";
@@ -186,6 +200,10 @@ in
       wantedBy = [ "multi-user.target" ];
       requires = [ "mytops-vnc.service" ];
       after = [ "mytops-vnc.service" ];
+      # `novnc` is a shell wrapper: it starts websockify and then checks whether
+      # it came up. Without `ps` it decides the proxy failed and exits 1, so the
+      # unit restarts forever and the port is only briefly bound.
+      path = unitPath;
       serviceConfig = {
         Type = "simple";
         Restart = "always";
