@@ -155,7 +155,8 @@ cmd_pin() {
   fi
 
   local rev
-  rev=$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || echo unknown)
+  # See cmd_pin_disk: REV is the revision the artifact was built from.
+  rev="${REV:-$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || echo unknown)}"
 
   log "bouwstraat: pin - $ENTRY_ID -> $repository@$digest"
   "$NODE" "$here/pin-digest.mjs" \
@@ -185,7 +186,11 @@ cmd_pin_disk() {
   [ -n "$sha256" ] || { log "bouwstraat: pin-disk needs the disk's sha256"; return 1; }
 
   local rev
-  rev=$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || echo unknown)
+  # REV names the revision the *artifact* was built from, which is not always
+  # HEAD: a build made by the cluster job records the commit it checked out, and
+  # pinning it later from a newer working tree would write the wrong ancestry
+  # into the catalog. Default to HEAD only when nobody says otherwise.
+  rev="${REV:-$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || echo unknown)}"
 
   log "bouwstraat: pin-disk - $ENTRY_ID -> $url"
   "$NODE" "$here/pin-digest.mjs" \
