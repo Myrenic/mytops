@@ -108,9 +108,9 @@ spec:
               # reading the same 4+ GB back out of it to checksum was a second
               # trip over the network for a number the write already had. The
               # temp name keeps a half-written disk from ever being served.
-              cat "$(cat /work/qcow2.path)/nixos.qcow2" \
+              DISK_SHA=$(cat "$(cat /work/qcow2.path)/nixos.qcow2" \
                 | tee /images/disk.qcow2.tmp \
-                | sha256sum > /work/disk.sha256
+                | sha256sum | cut -d' ' -f1)
               mv /images/disk.qcow2.tmp /images/disk.qcow2
               # nginx runs as uid 101 and must be able to read it.
               chmod 0644 /images/disk.qcow2
@@ -120,9 +120,10 @@ spec:
               echo "installed-bytes: $(stat -c %s /images/disk.qcow2)"
               # The checksum is the checksum of the copy on the volume - it is
               # taken from the bytes that were just written there - because what
-              # the catalog pins has to be what the importer reads.
-              cp /work/disk.sha256 /images/disk.qcow2.sha256
-              echo "GOLDEN-DISK-SHA256 $(cut -d' ' -f1 /work/disk.sha256)"
+              # the catalog pins has to be what the importer reads. The file
+              # keeps the `sha256sum` shape (digest, two spaces, path).
+              printf '%s  %s\n' "$DISK_SHA" /images/disk.qcow2 > /images/disk.qcow2.sha256
+              echo "GOLDEN-DISK-SHA256 $DISK_SHA"
               echo "GOLDEN-DISK-REV $REV"
               echo "BOUWSTRAAT-READY"
 
