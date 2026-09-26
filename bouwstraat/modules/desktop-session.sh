@@ -29,7 +29,6 @@ log_dir="${XDG_RUNTIME_DIR:-/tmp}"
 # itself is the reason it exists.
 start() {
   "$@" >"$log_dir/${1##*/}.log" 2>&1 &
-  child=$!
 }
 
 alive() {
