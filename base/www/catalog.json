@@ -70,6 +70,32 @@
         "ubuntu-vm"
       ],
       "idleSuspendMinutes": 60
+    },
+    {
+      "id": "nixos-desktop",
+      "name": "NixOS Desktop",
+      "description": "Full XFCE desktop on a NixOS image built by the bouwstraat. Reproducible from a pinned revision, digest-pinned in the catalog, and self-verifying against the hardening register.",
+      "type": "desktop",
+      "runtime": "vm-nixos",
+      "persistence": "persistent",
+      "lifecycle": "suspend",
+      "icon": "❄️",
+      "resources": {
+        "cpu": "2",
+        "memory": "2Gi"
+      },
+      "storage": "12Gi",
+      "homeStorage": "20Gi",
+      "groups": [
+        "nixos-desktop"
+      ],
+      "idleSuspendMinutes": 60,
+      "diskUrl": "http://mytops-images.services.svc.cluster.local/disk.qcow2",
+      "source": {
+        "flake": "bouwstraat#nixosConfigurations.mytops-vm-desktop",
+        "rev": "7d303fe86a4915e634e204ad90810b6346c0d335",
+        "sha256": "4b07f1380f20513aeb63a5478aabb34eb503346f249a64d65da4798daad989db"
+      }
     }
   ]
 }
