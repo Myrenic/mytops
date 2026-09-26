@@ -126,7 +126,7 @@ spec:
           resources:
             requests:
               cpu: "4"
-              memory: 12Gi
+              memory: 8Gi
           securityContext:
             # The disk-image step boots a VM through /dev/kvm, which needs both.
             privileged: true
