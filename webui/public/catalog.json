@@ -93,8 +93,8 @@
       "diskUrl": "http://mytops-images.services.svc.cluster.local/disk.qcow2",
       "source": {
         "flake": "bouwstraat#nixosConfigurations.mytops-vm-desktop",
-        "rev": "19ac154ee3fc8a185ffe7c7372636517ca380b82",
-        "sha256": "c46ac8b53e09adf19eb7dd3df56a709496a4f6363f985a7c6a2c9e07a2066f2d"
+        "rev": "fe04bffe914350f554413c3aee606c4642081182",
+        "sha256": "555f73bdd9b10b69c7f0e0917250d74f2bc6930098b9146fb5f83fd285421fab"
       }
     }
   ]
