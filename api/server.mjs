@@ -270,10 +270,15 @@ function containerWorkspaceStatus(dep) {
   return "starting"
 }
 
-function vmWorkspaceStatus(vm, streamReady) {
+// `rootDisk` is the workspace's DataVolume phase, when the caller has it. A VM
+// whose referenced disk is being imported never gets a VMI, and a disk that
+// failed to import never will: without this the workspace would sit on
+// "starting" forever instead of offering Restart.
+function vmWorkspaceStatus(vm, streamReady, rootDisk) {
   if (vm?.spec?.runStrategy === "Halted") return "suspended"
   if (vm?.status?.ready && streamReady) return "running"
   if (VM_FAILURE_STATES.has(vm?.status?.printableStatus)) return "offline"
+  if (rootDisk === "Failed") return "offline"
   return "starting"
 }
 
@@ -618,9 +623,72 @@ async function ensureService(namespace, name, build, headers) {
   await kubeFetch("POST", "/api/v1/namespaces/" + namespace + "/services", build(), headers)
 }
 
-// Tear down one workspace instance. Shared by user destroy and admin destroy
-// so both drop the VM disk and its retained Longhorn volume - admin destroy
-// used to leave a 10Gi ghost per workspace behind.
+// The Longhorn volume behind a workspace claim, by name. Longhorn's own
+// back-reference is the fallback because CDI owns the claim a DataVolume created
+// and may have removed it already - and a volume nobody can name is a volume
+// nobody deletes, since the StorageClass is Retain.
+async function workspaceVolumeByName(name, headers) {
+  try {
+    const list = await kubeFetch("GET",
+      "/apis/longhorn.io/v1beta2/namespaces/" + LONGHORN_NAMESPACE + "/volumes", null, headers)
+    for (const v of list?.items ?? []) {
+      const k = v?.status?.kubernetesStatus
+      if (k?.pvcName === name && k?.namespace === VM_NAMESPACE) return v.metadata.name
+    }
+  } catch (err) {
+    console.error("release " + name + ": cannot list Longhorn volumes: " + err.message)
+  }
+  return null
+}
+
+// Give back the disk behind a workspace's claim. Longhorn's StorageClasses are
+// reclaimPolicy: Retain, so a deleted PVC leaves the volume object (and its
+// disk) behind. Capture the volume name first, delete the PVC, wait for it to
+// actually go, then drop the volume. The wait matters: deleting the volume while
+// its PVC still exists lets the CSI driver recreate it - the old fixed 3 s sleep
+// just moved the race around instead of closing it.
+async function releaseClaim(name, headers) {
+  const failures = []
+  const pvcPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/persistentvolumeclaims/" + name
+  const pvc = await kubeFetch("GET", pvcPath, null, headers).catch(() => null)
+  let volumeName = isNotFound(pvc) ? null : (pvc?.spec?.volumeName ?? null)
+
+  if (!isNotFound(pvc)) {
+    try {
+      await kubeFetch("DELETE", pvcPath, null, headers)
+    } catch (err) {
+      failures.push(err.message)
+    }
+    const gone = await waitFor(
+      async () => isNotFound(await kubeFetch("GET", pvcPath, null, headers)),
+      20_000,
+      1000,
+    )
+    if (!gone) console.warn("release " + name + ": PVC still terminating")
+  }
+
+  if (!volumeName) volumeName = await workspaceVolumeByName(name, headers)
+  if (volumeName) {
+    try {
+      await kubeFetch("DELETE",
+        "/apis/longhorn.io/v1beta2/namespaces/" + LONGHORN_NAMESPACE + "/volumes/" + volumeName,
+        null, headers)
+    } catch (err) {
+      failures.push(err.message)
+    }
+  }
+  return failures
+}
+
+// Tear down one workspace instance.
+//
+// `keepRootDisk` leaves the imported root disk in place - the DataVolume, its
+// claim and the Longhorn volume behind them. A destroy from the owner passes it
+// for an entry the catalog calls persistent, because the disk is a copy of a
+// pinned artifact: keeping it is what turns the next launch from a 4.3GB
+// re-import (~2m20s at this cluster's measured CDI throughput) into a boot
+// (~40s). Admin destroy is the reclaim path and does not.
+//
 // Returns the list of errors; a 404 is not an error (nothing to delete).
 //
 // Only objects named after the instance (`ws-<entry>-<slug>`) are touched. The
@@ -628,7 +696,7 @@ async function ensureService(namespace, name, build, headers) {
 // survives a destroy: that is what lets a VM be rebuilt from scratch without
 // throwing the desktop profile away. Never widen these deletes into a selector
 // - it would take the user's data with it.
-async function teardownWorkspace(name, headers) {
+async function teardownWorkspace(name, headers, { keepRootDisk = false } = {}) {
   const failures = []
   const del = async (path) => {
     try {
@@ -648,28 +716,15 @@ async function teardownWorkspace(name, headers) {
   await del("/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines/" + name)
   await del("/api/v1/namespaces/" + VM_NAMESPACE + "/services/" + name + "-svc")
   await del("/api/v1/namespaces/" + VM_NAMESPACE + "/secrets/" + name + "-cloudinit")
-  await del("/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes/" + name)
 
-  // Longhorn's StorageClasses are reclaimPolicy: Retain, so a deleted PVC
-  // leaves the volume object (and its disk) behind. Capture the PV name from
-  // the PVC first, delete the PVC, wait for it to actually go, then drop the
-  // volume. The wait matters: deleting the volume while its PVC still exists
-  // lets the CSI driver recreate it - the old fixed 3 s sleep just moved the
-  // race around instead of closing it.
-  const pvcPath = "/api/v1/namespaces/" + VM_NAMESPACE + "/persistentvolumeclaims/" + name
-  const pvc = await kubeFetch("GET", pvcPath, null, headers).catch(() => null)
-  if (!isNotFound(pvc)) {
-    const pvName = pvc?.spec?.volumeName
-    await del(pvcPath)
-    if (pvName) {
-      const gone = await waitFor(
-        async () => isNotFound(await kubeFetch("GET", pvcPath, null, headers)),
-        20_000,
-        1000,
-      )
-      if (!gone) console.warn("teardown " + name + ": PVC still terminating")
-      await del("/apis/longhorn.io/v1beta2/namespaces/" + LONGHORN_NAMESPACE + "/volumes/" + pvName)
-    }
+  if (keepRootDisk) {
+    // The DataVolume and its claim stay behind on purpose: the next launch
+    // finds a disk already imported from the pinned artifact and boots from it.
+    // It is replaced only when the catalog pins a different one (ensureRootDisk).
+    console.log("teardown " + name + ": root disk kept")
+  } else {
+    await del("/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes/" + name)
+    failures.push(...await releaseClaim(name, headers))
   }
 
   return failures
@@ -858,6 +913,117 @@ function vmDiskSource(entry) {
   return { http: { url: VM_IMAGE_URL } }
 }
 
+// ── The workspace root disk ──────────────────────────────────────────
+//
+// A workspace's root disk is a copy of one catalog artifact, and the disk is
+// owned here rather than by the VirtualMachine (see buildVirtualMachine). The
+// difference is the entire cost of a rebuild: a `dataVolumeTemplates` entry is
+// garbage collected with the VM, so destroying a workspace threw away a 4.3GB
+// import and the next launch paid for it again - about 2m20s of the roughly
+// 4 minutes a launch took, at the ~31MB/s this cluster's CDI->Longhorn write
+// path actually achieves.
+//
+// A referenced DataVolume outlives the VM, so a relaunch reuses the disk and is
+// a boot (~40s) instead of an import. KubeVirt holds the VMI in Scheduling with
+// `DataVolumesReady=False` until the reference is ready, so a guest never sees
+// a half-written disk either.
+const ROOT_IMAGE_ANNOTATION = "mytops/image"
+
+// What the disk was imported from. Recorded on the DataVolume, so the next
+// launch can tell "the kept disk is the artifact the catalog still pins" from
+// "the catalog moved on" - and only the second of those costs an import.
+function imageIdentity(entry) {
+  if (entry?.image) return "image:" + entry.image
+  if (entry?.diskUrl) {
+    const sha = entry?.source?.sha256
+    return "disk:" + entry.diskUrl + (sha ? "#" + sha : "")
+  }
+  return "disk:" + VM_IMAGE_URL
+}
+
+function buildRootDataVolume(entry, name, owner, ownerEmail) {
+  const annotations = { [ROOT_IMAGE_ANNOTATION]: imageIdentity(entry) }
+  if (ownerEmail) annotations["mytops/owner-email"] = ownerEmail
+  return {
+    apiVersion: "cdi.kubevirt.io/v1beta1",
+    kind: "DataVolume",
+    metadata: {
+      name: name,
+      namespace: VM_NAMESPACE,
+      annotations,
+      labels: {
+        "app.kubernetes.io/name": name,
+        "mytops-owner": owner,
+        "mytops-runtime": entry.runtime || "vm-linux",
+        "mytops-persistence": entry.persistence || "disposable",
+        "mytops-lifecycle": entry.lifecycle || "ephemeral",
+      },
+    },
+    spec: {
+      source: vmDiskSource(entry),
+      pvc: {
+        accessModes: ["ReadWriteOnce"],
+        storageClassName: "longhorn",
+        resources: { requests: { storage: entry.storage || "10Gi" } },
+      },
+    },
+  }
+}
+
+function rootDiskPath(name) {
+  return "/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes/" + name
+}
+
+// Make sure the workspace has a disk imported from what the catalog pins today,
+// creating one only when there is nothing usable to reuse: either no disk at
+// all, or one imported from a different artifact.
+async function ensureRootDisk(entry, name, owner, ownerEmail, headers) {
+  const path = rootDiskPath(name)
+  const existing = await kubeFetch("GET", path, null, headers).catch(() => null)
+  if (isNotFound(existing)) {
+    await kubeFetch("POST", "/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes",
+      buildRootDataVolume(entry, name, owner, ownerEmail), headers)
+    return
+  }
+  const imported = existing?.metadata?.annotations?.[ROOT_IMAGE_ANNOTATION]
+  if (imported === imageIdentity(entry)) return
+
+  // The catalog pins a different artifact, so the kept disk is not what this
+  // workspace should be running. Replace it: same order as a destroy, because
+  // the Longhorn volume behind the claim is Retain and would otherwise be left
+  // as a ghost (see releaseClaim).
+  console.log("root disk " + name + ": replacing, imported=" + (imported ?? "unknown") +
+    " pinned=" + imageIdentity(entry))
+  await kubeFetch("DELETE", path, null, headers)
+    .catch((err) => console.error("root disk replace: " + err.message))
+  await releaseClaim(name, headers)
+  await kubeFetch("POST", "/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes",
+    buildRootDataVolume(entry, name, owner, ownerEmail), headers)
+}
+
+// name -> DataVolume phase for the workspaces a caller is about to report on.
+// A DataVolume that failed means the VM never started (KubeVirt will not create
+// the VMI), so without this a workspace whose import broke would sit on
+// "starting" forever instead of offering Restart.
+//
+// With no owner it answers for the whole namespace, which is what the admin
+// view needs; the `mytops/image` annotation is what identifies a disk this API
+// owns, so nothing else in the namespace can be mistaken for one.
+async function listRootDisks(ownerSlug, headers) {
+  const phases = new Map()
+  const filter = ownerSlug ? "?labelSelector=mytops-owner%3D" + ownerSlug : ""
+  try {
+    const list = await kubeFetch("GET",
+      "/apis/cdi.kubevirt.io/v1beta1/namespaces/" + VM_NAMESPACE + "/datavolumes" + filter,
+      null, headers)
+    for (const dv of list?.items ?? []) {
+      if (!ownerSlug && !dv.metadata?.annotations?.[ROOT_IMAGE_ANNOTATION]) continue
+      phases.set(dv.metadata?.name, dv.status?.phase ?? "")
+    }
+  } catch { /* CDI not installed yet, or nothing to report */ }
+  return phases
+}
+
 // Optional pin: streaming workloads should run on the least-loaded node
 // (control-plane nodes with etcd churn are poor homes for frame-latency
 // sensitive desktops). Empty = let the scheduler decide.
@@ -870,7 +1036,6 @@ function nodeSelector() {
 function buildVirtualMachine(entry, name, owner, ownerEmail) {
   const cpu = parseInt(entry.resources?.cpu) || 2
   const mem = entry.resources?.memory || "2Gi"
-  const storage = entry.storage || "10Gi"
   return {
     apiVersion: "kubevirt.io/v1",
     kind: "VirtualMachine",
@@ -914,8 +1079,12 @@ function buildVirtualMachine(entry, name, owner, ownerEmail) {
           terminationGracePeriodSeconds: 0,
           volumes: [
             {
+              // Referenced, not templated. The DataVolume belongs to this API
+              // (ensureRootDisk) so that destroying a workspace keeps the
+              // imported disk and the next launch reuses it; a template would
+              // be collected with the VM and the import paid again.
               name: "rootdisk",
-              persistentVolumeClaim: { claimName: name },
+              dataVolume: { name: name },
             },
             {
               name: "cloudinit",
@@ -928,21 +1097,6 @@ function buildVirtualMachine(entry, name, owner, ownerEmail) {
           ],
         },
       },
-      dataVolumeTemplates: [
-        {
-          metadata: { name: name },
-          spec: {
-            source: vmDiskSource(entry),
-            pvc: {
-              accessModes: ["ReadWriteOnce"],
-              storageClassName: "longhorn",
-              resources: {
-                requests: { storage: storage },
-              },
-            },
-          },
-        },
-      ],
     },
   }
 }
@@ -1248,6 +1402,11 @@ async function handleListWorkspaces(req, res, identity) {
     vmItems = vmList.items ?? []
   } catch { /* KubeVirt not installed yet */ }
 
+  // The disk's phase, for the same reason the VM's own status is read: a VM
+  // whose referenced DataVolume is still importing has no VMI yet, and one whose
+  // import failed will never have one.
+  const rootDisks = await listRootDisks(slug, req.headers)
+
   const vmWs = await Promise.all(vmItems
     .filter((vm) => vm.metadata?.labels?.["mytops-runtime"]?.startsWith("vm-"))
     .map(async (vm) => {
@@ -1269,7 +1428,7 @@ async function handleListWorkspaces(req, res, identity) {
         type: entry?.type ?? "desktop",
         runtime: entry?.runtime ?? "vm-linux",
         icon: entry?.icon,
-        status: vmWorkspaceStatus(vm, streamReady),
+        status: vmWorkspaceStatus(vm, streamReady, rootDisks.get(name)),
         streamReady,
         lastActiveAt: activity.get(name) ?? lastActiveFrom(vm),
         url: vmWorkspaceUrl(name, domain),
@@ -1401,6 +1560,13 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain, iden
       buildCloudInitSecret(name, cloudInitUserData({ homeSource, entry })), req.headers)
   }
 
+  // The disk comes before the VM: the VM references it, and KubeVirt holds the
+  // VMI until the reference is ready, so a fresh import and a reused disk are
+  // the same code path. A disk already imported from the artifact this entry
+  // pins today is reused as it is - that is the difference between a relaunch
+  // that boots and one that imports 4.3GB again.
+  await ensureRootDisk(entry, name, slug, identity?.email, req.headers)
+
   await kubeFetch("POST", "/apis/kubevirt.io/v1/namespaces/" + VM_NAMESPACE + "/virtualmachines",
     buildVirtualMachine(entry, name, slug, identity?.email), req.headers)
   touchActivity(name)
@@ -1415,16 +1581,37 @@ async function handleCreateVmWorkspace(req, res, entry, name, slug, domain, iden
   })
 }
 
-// DELETE /api/workspaces/:entryId — tear down a workspace and its disk.
+// Is this workspace's root disk one this API owns? Only then can a destroy keep
+// it: a disk from the older `dataVolumeTemplates` path is owned by the
+// VirtualMachine, so deleting the VM takes the DataVolume with it and leaves the
+// Longhorn volume behind with nothing pointing at it. Those workspaces get the
+// full teardown; the next launch imports once and creates a disk that can be
+// kept.
+async function ownsRootDisk(name, headers) {
+  const dv = await kubeFetch("GET", rootDiskPath(name), null, headers).catch(() => null)
+  return !isNotFound(dv) && !!dv?.metadata?.annotations?.[ROOT_IMAGE_ANNOTATION]
+}
+
+// DELETE /api/workspaces/:entryId — stop a workspace and give back what it holds.
+//
+// For an entry the catalog calls persistent the imported root disk is kept, and
+// the next launch boots from it instead of re-importing the multi-GB artifact.
+// The home volume has always survived a destroy for the same reason; this
+// extends that to the disk that is a copy of a pinned artifact. An entry the
+// catalog calls disposable gets its disk dropped, because there is nothing worth
+// keeping: the next launch is meant to start from the artifact.
 async function handleDeleteWorkspace(req, res, identity, entryId) {
   const slug = slugFor(identity.email)
   const name = instName(entryId, slug)
-  const failures = await teardownWorkspace(name, req.headers)
+  const entry = catalog.find((e) => e.id === entryId)
+  const keepRootDisk = !!entry && usesHome(entry) && await ownsRootDisk(name, req.headers)
+  const failures = await teardownWorkspace(name, req.headers, { keepRootDisk })
   if (failures.length) {
     audit(identity.email, "workspace.destroy", name, "failed: " + failures[0])
     return json(res, 502, { error: "teardown incomplete: " + failures[0] })
   }
-  audit(identity.email, "workspace.destroy", name, "home volume kept")
+  audit(identity.email, "workspace.destroy", name,
+    keepRootDisk ? "home volume kept, root disk kept" : "home volume kept")
   json(res, 200, { ok: true })
 }
 
@@ -1471,9 +1658,10 @@ async function handleAdminList(req, res, identity) {
   // An admin sees the same truth as the owner, so the VM rows get the same
   // guest probe the owner's list does (a booted guest whose desktop has not
   // come up is "starting", not "running").
+  const adminRootDisks = await listRootDisks(null, req.headers)
   await Promise.all(rows.filter((row) => row.runtime === "vm" && row.status === "starting").map(async (row) => {
     const vm = (vmsList.items ?? []).find((v) => v.metadata?.name === row.name)
-    if (vm) row.status = vmWorkspaceStatus(vm, await guestStreamReady(row.name))
+    if (vm) row.status = vmWorkspaceStatus(vm, await guestStreamReady(row.name), adminRootDisks.get(row.name))
   }))
 
   // One home volume per *user*, so look each owner up once no matter how many
@@ -1518,8 +1706,12 @@ async function handleAdminSuspend(req, res, identity, target, suspended) {
   json(res, 200, { ok: true, status: suspended ? "suspended" : "starting" })
 }
 
-// Admin: destroy a workspace by full object name (ws-<entryId>-<slug>). Same
-// teardown as the user path, so the VM disk and its Longhorn volume go too.
+// Admin: destroy a workspace by full object name (ws-<entryId>-<slug>).
+//
+// This is the reclaim path: unlike the owner's destroy it also drops the
+// imported root disk and its Longhorn volume (teardownWorkspace without
+// keepRootDisk), which is what an admin needs when a workspace has to give its
+// storage back.
 async function handleAdminDelete(req, res, identity, target) {
   if (!isAdmin(identity)) return json(res, 403, { error: "not admin" })
   if (!/^ws-[a-z0-9-]+$/.test(target)) return json(res, 400, { error: "bad workspace name" })

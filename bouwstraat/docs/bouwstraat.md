@@ -110,7 +110,10 @@ for anyone whose registry is not behind a body-size cap - the forge here is, so
 it is off (see `docs/pitfalls.md`).
 
 Existing workspaces keep the disk they were imported from; to pick up a new one,
-destroy and relaunch (the home volume survives both).
+destroy and relaunch (the home volume survives both). The destroy keeps the disk,
+so that relaunch imports only because the pin changed: relaunching a destroyed
+workspace whose pin did *not* change reuses the imported disk and boots from it
+in about 40 s instead of paying the multi-GB import again.
 
 ## Change the app set or the desktop
 

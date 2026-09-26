@@ -70,7 +70,10 @@ here is the second:
 Disk mode is what this cluster runs: the image store (`base/mytops-images`) serves
 the qcow2 over the pod network, so a multi-GB disk never crosses the public edge -
 pushing it to the forge fails with 413 (Cloudflare caps request bodies) and a
-per-launch pull would pay that path every time. `verify-catalog.mjs` and
+per-launch pull would pay that path every time. It is imported once per workspace
+per pinned artifact, not once per launch (see the root-disk note in the operating
+notes): a relaunch reuses the disk and only a new pin re-imports.
+`verify-catalog.mjs` and
 `build-configmap.mjs` accept either shape and refuse an entry that has neither a
 digest-pinned image nor a checksummed disk.
 
@@ -184,9 +187,13 @@ Two consequences for the API code, both of which it has to respect:
 - `mytops-idle-culler` deletes **container** sessions whose `mytops-lifecycle` label is
   `ephemeral`/`disposable` and that are older than `MAX_LIFETIME_MINUTES` (480).
   `suspend` and `persistent` sessions are never culled: the job has no idle signal,
-  only creation age. It has no opinion about VM workspaces at all - an entry with
-  `runtime: vm-*` and a cullable lifecycle would leak its disk, so either keep VM
-  entries `suspend`/`persistent` (as `ubuntu-vm` is) or extend the script first.
+  only creation age. It treats VM workspaces the same way and by the same
+  lifetime test: a cullable VM goes with its disk (VM, DataVolume, PVC and the
+  Longhorn volume, which the StorageClass would otherwise retain), while a
+  `suspend`/`persistent` VM entry is left alone - and only an admin can reclaim
+  a persistent entry's disk (see the root-disk note below). That is why every
+  VM entry in `catalog.json` is `suspend` or `persistent`: a cullable one is
+  destroyed, disk included, not suspended.
 - Workspace status is derived from the pod: `readyReplicas` (behind a TCP readiness
   probe on the desktop's port, so "Running" means the web client answers), a
   crash-looping container, or the VM's `printableStatus`. A workspace that cannot come
@@ -214,6 +221,28 @@ Two consequences for the API code, both of which it has to respect:
   Deleting the home is a deliberate manual act
   (`kubectl -n services delete deploy home-<slug>-keeper pvc home-<slug>` plus
   the PV/Longhorn volume behind it).
+- **A persistent entry keeps its root disk when its workspace is destroyed.**
+  A VM workspace's root disk is a DataVolume the API owns (`ensureRootDisk`),
+  named after the instance and annotated with the artifact it was imported from
+  (`mytops/image`). Destroying the workspace removes the VM, Service and route
+  and leaves that disk where it is, so the next launch finds it already imported
+  and the guest simply boots - roughly 40 s instead of the ~4 minutes a fresh
+  import costs here. The disk is replaced only when the catalog pins a different
+  artifact (a new bouwstraat rev, digest or `diskUrl`); `lifecycle` decides the
+  rest, so a `disposable`/`ephemeral` entry still drops its disk with its
+  workspace. Reclaiming a `persistent` workspace's storage is an admin act
+  (`DELETE /api/admin/workspaces/<name>`): the owner's destroy keeps the disk
+  exactly as it keeps the home.
+  Why it is *referenced* rather than a `dataVolumeTemplate`: a template's
+  DataVolume is owned by the VirtualMachine and garbage collected with it, so a
+  destroy threw away a 4.3 GB import. Measured on this cluster, that import runs
+  at ~31 MB/s through CDI into Longhorn while a plain buffered 1 MiB write
+  reaches 157 MB/s and the raw node disk does 710 MB/s - the copy is the wall,
+  so the fix is not to make it faster but to stop doing it again. KubeVirt waits
+  for a referenced DataVolume to be ready before starting the VMI (the VMI sits
+  in `Scheduling` with `DataVolumesReady=False`), so a guest never boots against
+  a half-written disk, and a DataVolume that failed to import reports `offline`
+  rather than an endless "Starting" - that VM will never start.
 - **Streams are owner-scoped.** Workspace IngressRoutes carry two middlewares:
   `oauth2-proxy-auth` (the existing chain) and `mytops-workspace-owner`, a
   forwardAuth declared in nebula that asks `GET /api/stream-auth` whether the
