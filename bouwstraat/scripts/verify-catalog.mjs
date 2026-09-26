@@ -30,6 +30,7 @@ const warnings = []
 const RUNTIMES = new Set(["container", "vm-linux", "vm-nixos"])
 const DIGEST = /@sha256:[0-9a-f]{64}$/
 const REV = /^[0-9a-f]{40}$/
+const SHA256 = /^[0-9a-f]{64}$/
 
 const seen = new Set()
 for (const entry of catalog.apps) {
@@ -56,19 +57,34 @@ for (const entry of catalog.apps) {
   const isVm = typeof entry.runtime === "string" && entry.runtime.startsWith("vm-")
 
   if (isVm) {
-    // A guest disk is built by the bouwstraat and referenced by digest. A tag
-    // would mean the next `docker push` of that tag changes what a workspace
-    // boots - with no change in this repository to review.
+    // Three legitimate shapes, in descending order of strength:
+    //   image@sha256  - a bouwstraat build pushed to a registry
+    //   diskUrl+sha256 - a bouwstraat build served from the in-cluster store
+    //   neither       - the API's built-in public cloud image (ubuntu-vm), which
+    //                   is a constant in the code rather than something this
+    //                   catalog can point somewhere else
+    // A tag, or a diskUrl with no checksum, is none of those: it is a workspace
+    // that boots whatever is behind that reference today.
+    const digestPinned = entry.image && DIGEST.test(entry.image)
+    const diskPinned = entry.diskUrl && SHA256.test(entry.source?.sha256 ?? "")
+
     if (entry.image && !DIGEST.test(entry.image)) {
       errors.push(where + ": vm image is not digest-pinned: " + entry.image)
     }
+    if (entry.diskUrl && !SHA256.test(entry.source?.sha256 ?? "")) {
+      errors.push(where + ": diskUrl has no source.sha256 to verify the disk against")
+    }
+    if (entry.source && !digestPinned && !diskPinned) {
+      errors.push(where + ": claims provenance but has neither a pinned image nor a pinned disk")
+    }
+    if (!entry.image && !entry.diskUrl) {
+      warnings.push(where + ": falls back to the built-in cloud image; nothing here pins what it boots")
+    }
+
     if (entry.source) {
       if (!entry.source.flake) errors.push(where + ": source has no flake")
       if (!REV.test(entry.source.rev ?? "")) {
         errors.push(where + ": source.rev is not a 40-character git revision: " + entry.source.rev)
-      }
-      if (!entry.image) {
-        errors.push(where + ": has provenance but no image; there is nothing to reproduce")
       }
     }
   }

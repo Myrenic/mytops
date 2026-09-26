@@ -42,6 +42,50 @@ The rule of thumb: **a module may read its own options in option values and in
 `mkIf` conditions, but never in anything that decides the shape of its own
 contribution.**
 
+## make-disk-image needs `/dev/kvm`, and it fails late and confusingly
+
+Building the qcow2 on a machine without KVM:
+
+```
+building '/nix/store/…-closure-info.drv'...
+error: Cannot build '/nix/store/…-nixos-disk-image.drv'.
+       Reason: missing system features
+       Required features: {kvm}
+       Available features: {benchmark, big-parallel, nixos-test, uid-range}
+```
+
+Two things make this worth a paragraph. It appears **after the entire system
+closure has been built** - minutes of work that looks like progress and then
+reads as a builder-configuration problem. And it is not a bug in the flake:
+`nixpkgs/lib/make-disk-image.nix` line 636 is `pkgs.vmTools.runInLinuxVM (...)`,
+because installing GRUB into the image means booting a small VM, and that
+derivation requires the `kvm` system feature.
+
+**What to do.** Build where `/dev/kvm` exists, and tell nix it may use it:
+
+```sh
+NIX_CONFIG='system-features = benchmark big-parallel nixos-test kvm
+sandbox = false' nix build .#packages.x86_64-linux.qcow2
+```
+
+A workstation in a VM without nested virtualisation cannot do this at all; the
+cluster nodes can (KubeVirt is running on them, so they must), and GitHub's
+runners can. `bouwstraat/cluster/build-in-cluster.yaml` is that build as a Job -
+it mounts `/dev/kvm`, sets the system feature, and pushes the result to the
+registry in one step. On the host this repository was developed on, that Job is
+the only way the qcow2 gets built.
+
+## A rebase mid-build makes files vanish
+
+`error: file '/src/bouwstraat/modules/home-mount.sh' does not exist` - while the
+file was right there, tracked, and had evaluated fine minutes earlier. The flake
+source for a dirty git tree is the *working tree*, and a rebase checks it out
+file by file: the build's copy raced the checkout and looked at the repository
+mid-rewrite. Nothing was wrong with the file.
+
+**What to do.** Do not rewrite the tree (rebase, checkout, stash) while a build
+is running. Nothing about the error will tell you that is what happened.
+
 ## `+` on a path eats the slash
 
 ```nix

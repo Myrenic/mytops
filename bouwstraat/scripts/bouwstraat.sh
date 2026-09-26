@@ -37,6 +37,9 @@ HOST="${HOST:-mytops-vm-desktop}"
 CATALOG="${CATALOG:-$repo_dir/webui/public/catalog.json}"
 ENTRY_TEMPLATE="${ENTRY_TEMPLATE:-$flake_dir/catalog/nixos-desktop.entry.json}"
 ENTRY_ID="${ENTRY_ID:-nixos-desktop}"
+# Where the disk-mode artifact is served from. In-cluster, because KubeVirt's
+# importer is; see base/mytops-images.yaml.
+DISK_URL="${DISK_URL:-http://mytops-images.services.svc.cluster.local/disk.qcow2}"
 
 log() { printf '%s\n' "$*" >&2; }
 
@@ -172,6 +175,32 @@ cmd_verify() {
   "$NODE" "$here/verify-catalog.mjs" --catalog "$CATALOG"
 }
 
+# Disk mode: the artifact is served by the in-cluster image store rather than
+# pushed to a registry (a multi-GB blob does not survive the public edge - see
+# docs/bouwstraat.md). Same promise, different mechanism: the catalog records the
+# sha256 the disk was built to, and the entry is refused without it.
+cmd_pin_disk() {
+  local sha256="${1:-}"
+  local url="${2:-$DISK_URL}"
+  [ -n "$sha256" ] || { log "bouwstraat: pin-disk needs the disk's sha256"; return 1; }
+
+  local rev
+  rev=$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || echo unknown)
+
+  log "bouwstraat: pin-disk - $ENTRY_ID -> $url"
+  "$NODE" "$here/pin-digest.mjs" \
+    --catalog "$CATALOG" \
+    --template "$ENTRY_TEMPLATE" \
+    --id "$ENTRY_ID" \
+    --disk-url "$url" \
+    --disk-sha256 "$sha256" \
+    --rev "$rev" \
+    --flake "bouwstraat#nixosConfigurations.$HOST"
+
+  "$NODE" "$here/verify-catalog.mjs" --catalog "$CATALOG"
+  log "bouwstraat: pinned. Commit the catalog change to make the workspace launchable."
+}
+
 usage() {
   cat >&2 <<'USAGE'
 usage: bouwstraat.sh <command>
@@ -179,11 +208,12 @@ usage: bouwstraat.sh <command>
   gate              evaluate every host and check the catalog invariants
   build             build the qcow2 and the OCI image
   promote [image]   push the OCI image, sign it, report the digest
-  pin [digest] [repo]  write the digest into the mytops catalog
+  pin [digest] [repo]    write a promoted image digest into the mytops catalog
+  pin-disk [sha256] [url]  write a served disk's checksum into the mytops catalog
   verify            catalog invariants only
 
 environment:
-  REGISTRY, IMAGE_NAME, HOST, CATALOG, ENTRY_TEMPLATE, ENTRY_ID
+  REGISTRY, IMAGE_NAME, HOST, CATALOG, ENTRY_TEMPLATE, ENTRY_ID, DISK_URL
   NIX, SKOPEO, COSIGN, NODE
 USAGE
 }
@@ -193,6 +223,7 @@ case "${1:-}" in
   build) cmd_build ;;
   promote) shift; cmd_promote "${1:-}" ;;
   pin) shift; cmd_pin "${1:-}" "${2:-}" ;;
+  pin-disk) shift; cmd_pin_disk "${1:-}" "${2:-}" ;;
   verify) cmd_verify ;;
   "" | -h | --help) usage; exit 2 ;;
   *) log "bouwstraat: unknown command: $1"; usage; exit 2 ;;

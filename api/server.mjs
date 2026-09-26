@@ -843,12 +843,17 @@ const VM_IMAGE_URL =
 
 // Where the guest disk comes from. An entry that carries an image reference was
 // built by the bouwstraat and is imported from the registry by CDI; an entry
-// without one falls back to the public cloud image, which is why ubuntu-vm
-// works with no build step at all. The catalog decides, not this function - and
-// verify-catalog.mjs is what keeps a bouwstraat entry digest-pinned.
+// with a diskUrl is served from the in-cluster image store (base/mytops-images);
+// an entry with neither falls back to the public cloud image, which is why
+// ubuntu-vm works with no build step at all. The catalog decides, not this
+// function - and verify-catalog.mjs is what keeps a bouwstraat entry either
+// digest-pinned or accompanied by the sha256 it was built to.
 function vmDiskSource(entry) {
   if (entry?.image) {
     return { registry: { url: "docker://" + entry.image } }
+  }
+  if (entry?.diskUrl) {
+    return { http: { url: entry.diskUrl } }
   }
   return { http: { url: VM_IMAGE_URL } }
 }

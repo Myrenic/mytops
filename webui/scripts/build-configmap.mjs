@@ -145,10 +145,29 @@ if (duplicate) {
 // bouwstraat script.
 for (const entry of catalog.apps) {
   const isVm = typeof entry.runtime === "string" && entry.runtime.startsWith("vm-")
-  if (isVm && entry.image && !/@sha256:[0-9a-f]{64}$/.test(entry.image)) {
+  if (!isVm) continue
+
+  const digestPinned = entry.image && /@sha256:[0-9a-f]{64}$/.test(entry.image)
+  const diskPinned = entry.diskUrl && /^[0-9a-f]{64}$/.test(entry.source?.sha256 ?? "")
+
+  if (entry.image && !digestPinned) {
     throw new Error(
       `public/catalog.json: ${entry.id} has an unpinned vm image (${entry.image}); ` +
         "run bouwstraat/scripts/bouwstraat.sh pin",
+    )
+  }
+  if (entry.diskUrl && !diskPinned) {
+    throw new Error(
+      `public/catalog.json: ${entry.id} has a diskUrl with no source.sha256; ` +
+        "run bouwstraat/scripts/bouwstraat.sh pin-disk",
+    )
+  }
+  // No image and no diskUrl is the API's built-in cloud image, which is a
+  // constant in server.mjs rather than something this catalog can repoint. What
+  // is not allowed is claiming provenance for one of those.
+  if (entry.source && !digestPinned && !diskPinned) {
+    throw new Error(
+      `public/catalog.json: ${entry.id} claims source provenance but pins neither an image nor a disk`,
     )
   }
 }

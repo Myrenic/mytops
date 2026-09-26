@@ -1,11 +1,16 @@
 #!/usr/bin/env node
-// Write a promoted image digest into the mytops catalog.
+// Write a promoted artifact into the mytops catalog.
 //
-// This is the only step that makes a bouwstraat build reachable: the catalog is
-// what the API reads, and an entry without a digest is refused by
-// verify-catalog.mjs, so an image that was built but not pinned does not exist
-// as far as a user is concerned. That is deliberate - the alternative is a
-// workspace that runs whatever a tag points at today.
+// Two shapes, both of which end in something a launch can be verified against:
+//
+//   image mode  - the OCI image the bouwstraat pushed, pinned by digest.
+//   disk mode   - the qcow2 the bouwstraat built, served by the in-cluster image
+//                 store, pinned by the sha256 it was built to.
+//
+// Whichever runs, this is the only step that makes a bouwstraat build reachable:
+// the catalog is what the API reads, and verify-catalog.mjs refuses an entry that
+// has neither. That is deliberate - the alternative is a workspace that runs
+// whatever a tag (or a file) happens to contain today.
 import { readFile, writeFile } from "node:fs/promises"
 
 const args = new Map()
@@ -21,24 +26,20 @@ function required(name) {
   return value
 }
 
+const SHA256 = /^[0-9a-f]{64}$/
+const DIGEST = /^sha256:[0-9a-f]{64}$/
+const REV = /^[0-9a-f]{40}$/
+
 const catalogPath = required("catalog")
 const templatePath = required("template")
 const id = required("id")
-const repository = required("repository")
-const digest = required("digest")
-const rev = required("rev")
 const flake = required("flake")
+const rev = required("rev")
 
-// A tag is a moving target; a digest is the artifact. Refusing anything else
-// here means the pin cannot be "pinned-ish".
-if (!/^sha256:[0-9a-f]{64}$/.test(digest)) {
-  throw new Error("--digest must be sha256:<64 hex>, got: " + digest)
-}
-
-// Same reasoning one level up: an image nobody can rebuild from a revision is
-// not evidence of anything. "unknown" is what git prints when it cannot answer,
-// and it is the value that would quietly become the record.
-if (!/^[0-9a-f]{40}$/.test(rev)) {
+// An image nobody can rebuild from a revision is not evidence of anything.
+// "unknown" is what git prints when it cannot answer, and it is the value that
+// would quietly become the record.
+if (!REV.test(rev)) {
   throw new Error("--rev must be a full 40-character git revision, got: " + rev)
 }
 
@@ -50,10 +51,31 @@ if (template.id !== id) {
   throw new Error("template id " + template.id + " does not match --id " + id)
 }
 
-const entry = {
-  ...template,
-  image: repository + "@" + digest,
-  source: { flake, rev },
+const entry = { ...template }
+
+const diskUrl = args.get("disk-url")
+const diskSha256 = args.get("disk-sha256")
+
+if (diskUrl || diskSha256) {
+  if (!diskUrl) throw new Error("--disk-url is required alongside --disk-sha256")
+  if (!SHA256.test(diskSha256 ?? "")) {
+    throw new Error("--disk-sha256 must be 64 hex characters, got: " + diskSha256)
+  }
+  // The disk is served from the cluster's own image store, so there is no image
+  // reference to pin - the integrity comes from the checksum instead, which is
+  // the same promise by a different mechanism.
+  delete entry.image
+  entry.diskUrl = diskUrl
+  entry.source = { flake, rev, sha256: diskSha256 }
+} else {
+  const repository = required("repository")
+  const digest = args.get("digest")
+  if (!DIGEST.test(digest ?? "")) {
+    throw new Error("--digest must be sha256:<64 hex>, got: " + digest)
+  }
+  entry.image = repository + "@" + digest
+  entry.source = { flake, rev }
+  delete entry.diskUrl
 }
 
 const index = catalog.apps.findIndex((e) => e.id === id)
@@ -67,7 +89,8 @@ await writeFile(catalogPath, JSON.stringify(catalog, null, 2) + "\n")
 
 console.log(
   (created ? "added " : "updated ") + id + " in " + catalogPath + "\n" +
-  "  image: " + entry.image + "\n" +
+  "  " + (entry.image ? "image: " + entry.image : "disk:  " + entry.diskUrl) + "\n" +
+  (entry.source.sha256 ? "  sha256: " + entry.source.sha256 + "\n" : "") +
   "  rev:   " + rev + "\n" +
   "  note:  commit this, then webui/scripts/build-configmap.mjs regenerates the bundle",
 )

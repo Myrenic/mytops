@@ -1,0 +1,150 @@
+# Build the bouwstraat image inside the cluster.
+#
+# Why this exists: nixpkgs' make-disk-image installs GRUB by booting a small VM
+# (pkgs.vmTools.runInLinuxVM), so the derivation requires the `kvm` system
+# feature. A workstation without /dev/kvm therefore cannot build the qcow2 at
+# all - it fails with "Reason: missing system features / Required features:
+# {kvm}" only after the whole system closure has been built. The cluster nodes
+# run KubeVirt, so they do have /dev/kvm, and the registry the image is pushed to
+# is one hop away: build where both are true.
+#
+# This is applied by hand, not by Flux: it is a one-shot build, not a desired
+# state. `scripts/bouwstraat.sh build` remains the path for anyone with a local
+# KVM host.
+#
+# Prerequisites (documented in docs/bouwstraat.md):
+#   kubectl -n services create secret docker-registry forgejo-registry \
+#     --docker-server=forge.tuntelder.com --docker-username=<user> \
+#     --docker-password=<token>
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bouwstraat-build
+  namespace: services
+spec:
+  backoffLimit: 0
+  # Keep the finished pod's logs around long enough to read the digest, then
+  # clean up after itself.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bouwstraat
+        app.kubernetes.io/component: build
+    spec:
+      restartPolicy: Never
+      # Any node has /dev/kvm; pinned so a rebuild lands where the last one did
+      # and the on-node store below is reused instead of re-fetched.
+      nodeSelector:
+        kubernetes.io/hostname: talos-45w-c87
+      initContainers:
+        # A nix store cannot be mounted empty over /nix: the nix binary itself
+        # lives there, so an empty volume makes the image unusable. Seed the
+        # cache from the image once, then let it grow across builds.
+        - name: seed-store
+          image: docker.io/nixos/nix:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -x /cache/var/nix/profiles/default/bin/nix ]; then
+                echo "store cache already seeded"
+              else
+                echo "seeding store cache from the image"
+                cp -a /nix/. /cache/
+              fi
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+      containers:
+        - name: build
+          image: docker.io/nixos/nix:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eux
+
+              # kvm is not in nix's default system-features, and the disk-image
+              # step needs it; sandbox=false because a pod has no user namespace
+              # for the nix sandbox, and the VM the image build boots is already
+              # the isolation that matters here.
+              export NIX_CONFIG='experimental-features = nix-command flakes
+              system-features = benchmark big-parallel nixos-test kvm
+              sandbox = false'
+
+              # Only skopeo: the nixos/nix image already provides git and a CA
+              # bundle in its profile, and `nix profile install git` fails with a
+              # file conflict against that git-minimal before anything is built.
+              nix profile install nixpkgs#skopeo
+
+              # skopeo refuses to run without a container signature policy, and
+              # an image build has nothing to verify against. This says so
+              # explicitly instead of failing with "no policy.json file found"
+              # after the disk has been built. Registry TLS is unaffected.
+              mkdir -p /etc/containers
+              printf '%s\n' '{"default":[{"type":"insecureAcceptAnything"}]}' \
+                > /etc/containers/policy.json
+
+              git clone --quiet https://github.com/Myrenic/mytops /work/mytops
+              cd /work/mytops
+              git checkout --quiet "$REV"
+              cd bouwstraat
+
+              nix build --no-link --print-out-paths .#packages.x86_64-linux.qcow2 | tee /work/qcow2.path
+              nix build --no-link --print-out-paths .#packages.x86_64-linux.ociImage | tee /work/oci.path
+
+              # The tag is for humans; the digest printed below is what the
+              # catalog pins, and it is read back from the registry rather than
+              # assumed.
+              skopeo copy --authfile /auth/.dockerconfigjson \
+                "docker-archive:$(cat /work/oci.path)" \
+                "docker://$REGISTRY/$IMAGE:rev-$SHORT"
+
+              skopeo inspect --authfile /auth/.dockerconfigjson --format '{{.Digest}}' \
+                "docker://$REGISTRY/$IMAGE:rev-$SHORT" | tee /work/digest
+
+              echo "BOUWSTRAAT-IMAGE $REGISTRY/$IMAGE@$(cat /work/digest)"
+          env:
+            - name: REV
+              value: "8c5ea363a79910f6ebc4231246d88389c48437e1"
+            - name: SHORT
+              value: "8c5ea363a799"
+            - name: REGISTRY
+              value: "forge.tuntelder.com"
+            - name: IMAGE
+              value: "mtuntelder/mytops-desktop-nixos"
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            # The disk-image step boots a VM through /dev/kvm, which needs both.
+            privileged: true
+          volumeMounts:
+            - name: cache
+              mountPath: /nix
+            - name: kvm
+              mountPath: /dev/kvm
+            - name: registry-auth
+              mountPath: /auth
+              readOnly: true
+            - name: work
+              mountPath: /work
+      volumes:
+        # Disposable build cache, not data: a hostPath keeps ~20 GiB of closure
+        # out of Longhorn and makes a retry (or the next revision) a no-op
+        # instead of another full download from cache.nixos.org.
+        - name: cache
+          hostPath:
+            path: /var/mytops-bouwstraat-nix
+            type: DirectoryOrCreate
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        - name: registry-auth
+          secret:
+            secretName: forgejo-registry
+        - name: work
+          emptyDir:
+            sizeLimit: 8Gi

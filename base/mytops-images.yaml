@@ -1,0 +1,123 @@
+# The workspace image store.
+#
+# KubeVirt's CDI importer creates a pod when a DataVolume is created, so the
+# guest disk has to be reachable from the cluster - but it does not have to be
+# reachable from anywhere else. Serving it here keeps multi-GB disk images off
+# the public edge entirely: pushing this image through the ingress failed with
+# 413 Payload Too Large (Cloudflare caps request bodies), and a per-launch pull
+# from a public registry would pay that path every time.
+#
+# The volume is populated by bouwstraat/cluster/install-golden.yaml, which copies
+# the qcow2 the bouwstraat built into it and prints the sha256 the catalog pins.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mytops-images
+  namespace: services
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 12Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mytops-images
+  namespace: services
+spec:
+  replicas: 1
+  # One writer: the volume is RWO and the install job copies into it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mytops-images
+  template:
+    metadata:
+      labels:
+        app: mytops-images
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: nginx
+          image: nginx:1.31-alpine
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: images
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+            - name: cache
+              mountPath: /var/cache/nginx
+            - name: run
+              mountPath: /var/run
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          # A TCP probe, not an HTTP GET: the only file here is a multi-GB qcow2,
+          # and an HTTP probe would fetch it.
+          readinessProbe:
+            tcpSocket:
+              port: http
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: images
+          persistentVolumeClaim:
+            claimName: mytops-images
+        - name: cache
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mytops-images
+  namespace: services
+spec:
+  selector:
+    app: mytops-images
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Only the importer may read this: the disks are cluster-internal and there is
+# no reason for anything else in `services` (or outside it) to pull them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mytops-images
+  namespace: services
+spec:
+  podSelector:
+    matchLabels:
+      app: mytops-images
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # CDI import pods run in the namespace of the DataVolume they serve.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kubevirt
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cdi
+      ports:
+        - port: 80
+          protocol: TCP

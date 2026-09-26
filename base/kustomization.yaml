@@ -5,6 +5,7 @@ resources:
   - ./webui.yaml
   - ./networkpolicy.yaml
   - ./home-agent-networkpolicy.yaml
+  - ./mytops-images.yaml
   - ./control.yaml
   - ./nginx.yaml
   - ./mytops-api-catalog.configmap.json

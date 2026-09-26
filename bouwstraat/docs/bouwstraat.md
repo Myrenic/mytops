@@ -57,6 +57,32 @@ What to watch, in order, because each step fails differently:
    either. A resume that loses files means the mount was not there to begin
    with, so look at step 4 rather than at suspension.
 
+## Building where there is no KVM
+
+`make-disk-image` boots a small VM to install the bootloader, so it needs
+`/dev/kvm` (see `docs/pitfalls.md`). If your workstation is itself a VM without
+nested virtualisation, `bouwstraat.sh build` will fail after building the whole
+closure. Build in the cluster instead - it has KVM because KubeVirt runs there:
+
+```sh
+# one-off, not managed by Flux: it is a build, not a desired state
+kubectl -n services create secret docker-registry forgejo-registry \
+  --docker-server=forge.tuntelder.com --docker-username=<user> \
+  --docker-password=<token>
+kubectl apply -f bouwstraat/cluster/build-in-cluster.yaml
+kubectl -n services logs -f job/bouwstraat-build | tee /tmp/bouw.log
+# the last line is BOUWSTRAAT-IMAGE <registry>/<image>@sha256:<digest>
+```
+
+Then pin that digest, which is the same step as always:
+
+```sh
+./scripts/bouwstraat.sh pin sha256:<digest> forge.tuntelder.com/mtuntelder/mytops-desktop-nixos
+```
+
+Edit `REV`/`SHORT` in the Job's env before running it for a new revision; the
+Job prints the digest it read back from the registry, never the one it assumed.
+
 ## Change the app set or the desktop
 
 `modules/hosts/vm-desktop.nix` is the only file to edit: `mytops.desktop.apps`
