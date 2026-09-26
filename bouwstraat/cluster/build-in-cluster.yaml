@@ -106,9 +106,9 @@ spec:
               echo "BOUWSTRAAT-IMAGE $REGISTRY/$IMAGE@$(cat /work/digest)"
           env:
             - name: REV
-              value: "8c5ea363a79910f6ebc4231246d88389c48437e1"
+              value: "7b3e6ed6ceb673e148adbeda58adb9bbff885df3"
             - name: SHORT
-              value: "8c5ea363a799"
+              value: "7b3e6ed6ceb6"
             - name: REGISTRY
               value: "forge.tuntelder.com"
             - name: IMAGE
