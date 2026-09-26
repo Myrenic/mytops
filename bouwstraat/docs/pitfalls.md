@@ -86,6 +86,67 @@ mid-rewrite. Nothing was wrong with the file.
 **What to do.** Do not rewrite the tree (rebase, checkout, stash) while a build
 is running. Nothing about the error will tell you that is what happened.
 
+## An initrd without virtio_blk makes a running VM with no disk
+
+The first boot of the first built disk reached stage 1 and stopped:
+
+```
+<<< NixOS Stage 1 >>>
+waiting for device /dev/disk/by-label/nixos to appear....................
+mount: can't find /mnt-root/ in /proc/mounts
+stage 2 init script (/mnt-root//nix/store/…-nixos-system-…/init) not found
+```
+
+Everything looked healthy from outside: the DataVolume imported, the VMI was
+Running and Ready, the virt-launcher pod was 2/2. Inside, KubeVirt had attached
+the disk as **virtio** and the initrd had no `virtio_blk`, so stage 1 waited for a
+device that could never appear. `boot.initrd.availableKernelModules` in
+`modules/image.nix` is the fix, and it doubles as what the NoCloud seed disk needs.
+
+**What to do when a guest does nothing.** Look at it, don't infer it: the serial
+console (`virtctl console`, and now `console=ttyS0,115200` in the image) names the
+stage and the device it is waiting for. `virt-serial0-log` inside the
+virt-launcher pod has the same output, readable with `kubectl exec` when nobody
+wants an interactive session.
+
+## A multi-GB blob cannot be pushed through the public hostname
+
+`skopeo copy` to the forge died with `413 Payload Too Large` - the forge is behind
+Cloudflare, and Cloudflare caps request bodies (100 MB on the free plan). No
+amount of retrying fixes that, and pulling multi-GB images from a public registry
+on every workspace launch pays the same path each time.
+
+**What to do.** Serve the disk from the cluster (`base/mytops-images`) and pin it
+by checksum: the catalogue gets `diskUrl` + `source.sha256`, the importer reads
+it over the pod network, and nothing crosses the edge. `PUSH_REGISTRY=1` keeps the
+registry path available for anyone whose registry is directly reachable.
+
+## A nix store on a volume kept being wrong
+
+Three attempts, three symptoms: a malformed `db.sqlite` (node hostPath), a hash
+mismatch importing a substituted path (Longhorn), and `path '…-root-profile-env'
+is not a valid store path` from a profile written to the same volume. The
+container's own writable layer completed a full build on the first attempt.
+
+**What to do.** Accept the download. A build store that is occasionally wrong is
+worse than one that is occasionally slow, because the failure surfaces as a
+mismatch somewhere else - in the disk image, in the tar, in the guest. Bare
+`nix-store --verify --repair` is worth adding if you do persist a store; it was
+not enough here.
+
+## RWX for the image store, not a scale-down dance
+
+The image store started ReadWriteOnce, which meant the build job and nginx could
+not mount it at once - so installing a disk required scaling nginx to zero first.
+That failed in the usual way: the volume stayed attached on another node, the
+build pod sat in `ContainerCreating` with `FailedAttachVolume`, and unsticking it
+meant deleting a pod and a stale `VolumeAttachment` by hand. Then the new pod
+blocked the PVC's deletion through the protection finalizer, so the volume could
+neither be released nor replaced.
+
+**What to do.** RWX (what the user home volumes already use). A build installs a
+new disk while the store keeps serving, and none of the above is reachable.
+
 ## `+` on a path eats the slash
 
 ```nix

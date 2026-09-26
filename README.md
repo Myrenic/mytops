@@ -56,35 +56,44 @@ errors; it is deliberately not part of the gate.
 A second VM guest besides `ubuntu-vm`: `runtime: vm-nixos` boots a disk this
 repository builds, not a stock cloud image. Everything that makes the desktop -
 kernel, XFCE, Xvfb/x11vnc/noVNC, the hardening - is one flake built from a pinned
-nixpkgs revision, and the catalog references it by **digest**:
+nixpkgs revision. There are two ways to reference the result, and the one in use
+here is the second:
 
 ```json
 "runtime": "vm-nixos",
-"image": "registry.example/mytops/desktop-nixos@sha256:...",
-"source": { "flake": "bouwstraat#nixosConfigurations.mytops-vm-desktop", "rev": "<40 hex>" }
+"image": "registry.example/desktop-nixos@sha256:...",            // pushed to a registry
+"diskUrl": "http://mytops-images.services.svc.cluster.local/disk.qcow2",  // served in-cluster
+"source": { "flake": "bouwstraat#nixosConfigurations.mytops-vm-desktop",
+            "rev": "<40 hex>", "sha256": "<64 hex, disk mode only>" }
 ```
 
-The API needs almost nothing new for this: `vmDiskSource(entry)` imports from a
-registry (CDI) when the entry carries an image and falls back to the public cloud
-image when it does not, and `cloudInitUserData` sends a NixOS guest its home
-volume instead of an apt/docker bootstrap. Service, IngressRoute, readiness probe
-and status derivation are unchanged - a NixOS workspace answers on 8080 like
-every other VM.
+Disk mode is what this cluster runs: the image store (`base/mytops-images`) serves
+the qcow2 over the pod network, so a multi-GB disk never crosses the public edge -
+pushing it to the forge fails with 413 (Cloudflare caps request bodies) and a
+per-launch pull would pay that path every time. `verify-catalog.mjs` and
+`build-configmap.mjs` accept either shape and refuse an entry that has neither a
+digest-pinned image nor a checksummed disk.
+
+The API needs almost nothing new for this: `vmDiskSource(entry)` picks the
+registry import, the served disk, or the public cloud image; `cloudInitUserData`
+sends a NixOS guest its home volume instead of an apt/docker bootstrap. Service,
+IngressRoute, readiness probe and status derivation are unchanged - a NixOS
+workspace answers on 8080 like every other VM.
 
 Build and pin one:
 
 ```bash
-bouwstraat/scripts/bouwstraat.sh gate     # every host evaluates + catalog invariants
-bouwstraat/scripts/bouwstraat.sh build
-bouwstraat/scripts/bouwstraat.sh promote  # push + sign, prints the digest
-bouwstraat/scripts/bouwstraat.sh pin      # writes image@digest + source.rev into the catalog
-(cd webui && npm run build)               # regenerate the catalog ConfigMap
+# in the cluster: the image build needs /dev/kvm, which a KVM-less workstation
+# does not have (see bouwstraat/docs/pitfalls.md)
+kubectl apply -f bouwstraat/cluster/build-in-cluster.yaml
+kubectl -n services logs -f job/bouwstraat-build   # prints GOLDEN-DISK-SHA256
+
+REV=<rev from the log> ./bouwstraat/scripts/bouwstraat.sh pin-disk <sha256 from the log>
+(cd webui && npm run build)                        # regenerate the catalog ConfigMap
 ```
 
-`pin` is what makes the entry launchable. `verify-catalog.mjs` refuses a `vm-*`
-entry whose image is not `@sha256:`-pinned, and `build-configmap.mjs` refuses to
-ship one - a tag is a reference somebody else can repoint, and this is the one
-place where that decides what code runs on a user's desktop. See
+`pin-disk` is what makes the entry launchable. With a reachable registry instead,
+`bouwstraat.sh build|promote|pin` is the same street with a digest at the end. See
 `bouwstraat/docs/` for the architecture, the runbook and the pitfalls.
 
 ## Deploy

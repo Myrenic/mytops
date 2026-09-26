@@ -62,26 +62,39 @@ What to watch, in order, because each step fails differently:
 `make-disk-image` boots a small VM to install the bootloader, so it needs
 `/dev/kvm` (see `docs/pitfalls.md`). If your workstation is itself a VM without
 nested virtualisation, `bouwstraat.sh build` will fail after building the whole
-closure. Build in the cluster instead - it has KVM because KubeVirt runs there:
+closure. Build in the cluster instead - it has KVM because KubeVirt runs there,
+and it installs the disk onto the image store in the same job:
 
 ```sh
-# one-off, not managed by Flux: it is a build, not a desired state
-kubectl -n services create secret docker-registry forgejo-registry \
-  --docker-server=forge.tuntelder.com --docker-username=<user> \
-  --docker-password=<token>
+# edit REV/SHORT in bouwstraat/cluster/build-in-cluster.yaml to the revision to
+# build (the one commit that is not on the workspace node's disk is the point)
 kubectl apply -f bouwstraat/cluster/build-in-cluster.yaml
 kubectl -n services logs -f job/bouwstraat-build | tee /tmp/bouw.log
-# the last line is BOUWSTRAAT-IMAGE <registry>/<image>@sha256:<digest>
+# the interesting lines at the end:
+#   installed-bytes: 4352638976
+#   GOLDEN-DISK-SHA256 <64 hex>
+#   GOLDEN-DISK-REV <the revision it checked out>
 ```
 
-Then pin that digest, which is the same step as always:
+Then pin it - with `REV`, because the revision an artifact was built from is not
+necessarily your HEAD:
 
 ```sh
-./scripts/bouwstraat.sh pin sha256:<digest> forge.tuntelder.com/mtuntelder/mytops-desktop-nixos
+REV=<40 hex from GOLDEN-DISK-REV> \
+  ./scripts/bouwstraat.sh pin-disk <64 hex from GOLDEN-DISK-SHA256>
+(cd webui && npm run build)     # regenerate the catalog ConfigMap
+git add -A && git commit -m "feat(bouwstraat): ship <rev>"
+git push                        # Flux reconciles; ConfigMaps need a restart
 ```
 
-Edit `REV`/`SHORT` in the Job's env before running it for a new revision; the
-Job prints the digest it read back from the registry, never the one it assumed.
+No registry is involved: the disk is served from `base/mytops-images` (RWX, so a
+build can install a new disk while the store keeps serving) and the entry is
+pinned by checksum. `PUSH_REGISTRY=1` in the job switches the OCI path back on
+for anyone whose registry is not behind a body-size cap - the forge here is, so
+it is off (see `docs/pitfalls.md`).
+
+Existing workspaces keep the disk they were imported from; to pick up a new one,
+destroy and relaunch (the home volume survives both).
 
 ## Change the app set or the desktop
 
